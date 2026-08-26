@@ -126,20 +126,14 @@ const forwardRequest = async (clientReq, clientRes, bodyBuffer = null) => {
 
     const targetUrl = `https://${targetHostname}${clientReq.url}`;
 
-    // SPOOF ORIGIN & REFERER TO BYPASS HOTLINK PROTECTION
-    const spoofedReferer = `https://${targetHostname}${clientReq.url}`;
-    const spoofedOrigin = `https://${targetHostname}`;
-
     const args = [
-      "-s", "-i", "-L", // Added -L to follow redirects automatically
+      "-s", "-i",
       "-X", clientReq.method,
       targetUrl,
       "-H", `Host: ${targetHostname}`,
       "-H", `User-Agent: ${clientReq.headers["user-agent"] || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36"}`,
-      "-H", `Accept: ${clientReq.headers["accept"] || "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"}`,
-      "-H", `Accept-Language: ${clientReq.headers["accept-language"] || "en-US,en;q=0.9"}`,
-      "-H", `Referer: ${spoofedReferer}`,
-      "-H", `Origin: ${spoofedOrigin}`
+      "-H", `Accept: ${clientReq.headers["accept"] || "*/*"}`,
+      "-H", `Accept-Language: ${clientReq.headers["accept-language"] || "en-US,en;q=0.9"}`
     ];
 
     if (clientReq.headers["content-type"]) {
@@ -154,42 +148,44 @@ const forwardRequest = async (clientReq, clientRes, bodyBuffer = null) => {
       args.push("--data-binary", finalBody.toString("utf8"));
     }
 
+    // Execute curl returning raw binary buffer
     const { stdout } = await execFileAsync(CURL_CHROME_BIN, args, {
       maxBuffer: 100 * 1024 * 1024,
       encoding: "buffer"
     });
 
-    // Parse headers from the final response (handles cURL -L redirect chains)
-    const headerBlocks = stdout.toString("latin1").split("\r\n\r\n");
-    let headerText = "";
-    let headerEndIndex = 0;
+    // CRITICAL FIX: Find double newline boundary (\r\n\r\n or \n\n) safely in binary
+    let headerEndIndex = stdout.indexOf(Buffer.from("\r\n\r\n"));
+    let delimiterLength = 4;
 
-    // Find the last HTTP response header block
-    for (let i = 0; i < headerBlocks.length - 1; i++) {
-      if (headerBlocks[i].startsWith("HTTP/")) {
-        headerText = headerBlocks[i];
-        headerEndIndex = stdout.indexOf(Buffer.from(headerBlocks[i])) + Buffer.from(headerBlocks[i]).length + 4;
-      }
+    if (headerEndIndex === -1) {
+      headerEndIndex = stdout.indexOf(Buffer.from("\n\n"));
+      delimiterLength = 2;
     }
 
-    if (!headerText) {
+    if (headerEndIndex === -1) {
       throw new Error("Invalid HTTP response format from upstream.");
     }
 
-    const responseBodyBuffer = stdout.subarray(headerEndIndex);
-    const headerLines = headerText.split("\r\n");
+    const rawHeadersBuffer = stdout.subarray(0, headerEndIndex);
+    const responseBodyBuffer = stdout.subarray(headerEndIndex + delimiterLength);
+
+    const rawHeadersText = rawHeadersBuffer.toString("latin1"); // Prevents UTF-8 corruption of header bytes
+    const headerLines = rawHeadersText.split(/\r?\n/);
     const statusLine = headerLines.shift();
     const statusCode = parseInt(statusLine.split(" ")[1], 10) || 200;
 
     const headers = {};
     for (const line of headerLines) {
-      const [key, ...values] = line.split(":");
-      if (key && values.length > 0) {
-        headers[key.trim().toLowerCase()] = values.join(":").trim();
+      const parts = line.split(":");
+      const key = parts.shift();
+      const value = parts.join(":");
+      if (key && value) {
+        headers[key.trim().toLowerCase()] = value.trim();
       }
     }
 
-    // Strip troublesome response headers
+    // Remove headers that break binary delivery or enforce origin constraints
     delete headers["content-security-policy"];
     delete headers["content-security-policy-report-only"];
     delete headers["x-frame-options"];
@@ -207,7 +203,7 @@ const forwardRequest = async (clientReq, clientRes, bodyBuffer = null) => {
     const contentType = headers["content-type"] || "";
     const isStaticAsset = clientReq.url.match(/\.(png|jpg|jpeg|gif|svg|webp|woff|woff2|ttf|ico|css|js)(\?.*)?$/i);
 
-    // HTML modification
+    // Serve string HTML modification ONLY to HTML routes
     if (statusCode === 200 && contentType.includes("text/html") && !isStaticAsset) {
       let html = responseBodyBuffer.toString("utf8");
 
@@ -223,7 +219,7 @@ const forwardRequest = async (clientReq, clientRes, bodyBuffer = null) => {
       return clientRes.end(newBody);
     }
 
-    // Raw binary pass-through for images
+    // Direct binary pass-through for PNGs/Fonts
     headers["content-length"] = responseBodyBuffer.length;
     clientRes.writeHead(statusCode, headers);
     clientRes.end(responseBodyBuffer);
