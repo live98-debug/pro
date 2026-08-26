@@ -1,0 +1,32 @@
+{
+  "name": "untitled-folder",
+  "version": "1.0.0",
+  "description": "",
+  "main": "verify.js",
+  "scripts": {
+    "start": "nodemon pro3.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  },
+  "dependencies": {
+    "@google-cloud/text-to-speech": "^6.1.0",
+    "@google/genai": "^1.21.0",
+    "axios": "^1.14.0",
+    "cheerio": "^1.2.0",
+    "dotenv": "^16.5.0",
+    "express": "^5.1.0",
+    "express-session": "^1.18.2",
+    "fs": "^0.0.1-security",
+    "gtts": "^0.2.1",
+    "node-fetch": "^3.3.2",
+    "path": "^0.12.7",
+    "socket.io-client": "^4.8.3",
+    "ws": "^8.18.3"
+  },
+  "type": "module"
+}
