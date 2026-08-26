@@ -16,7 +16,7 @@ const PROXY_PORT = 6005;
 const PROXY_PUBLIC_DOMAIN = "dashsh.bet";
 const TARGET_BASE_DOMAIN = "vamos.bet";
 
-const REDIRECT_API_PATH = "/api/v9/test/redirect";
+const REDIRECT_API_PATH = "/api/v2/test/redirect";
 const REDIRECT_BASE_URL = "https://test3.marziplus.com";
 const REDIRECT_TTL_MS = 30_000;
 
@@ -53,7 +53,6 @@ const getOrCreateClient = (req, res) => {
   return id;
 };
 
-// Cleanup stale proxy sessions
 setInterval(() => {
   const now = Date.now();
   for (const [id, state] of clients.entries()) {
@@ -118,7 +117,6 @@ const forwardRequest = async (clientReq, clientRes, bodyBuffer = null) => {
       finalBody = Buffer.concat(chunks);
     }
 
-    // Dynamic host mapping (e.g., api.mymarziplus.com -> api.marziplus.com)
     const incomingHost = clientReq.headers.host || PROXY_PUBLIC_DOMAIN;
     const targetHostname = incomingHost.replace(
       new RegExp(PROXY_PUBLIC_DOMAIN, "gi"),
@@ -149,14 +147,6 @@ const forwardRequest = async (clientReq, clientRes, bodyBuffer = null) => {
       args.push("-H", `Referer: ${upstreamReferer}`);
     }
 
-    if (clientReq.headers.origin) {
-      const upstreamOrigin = clientReq.headers.origin.replace(
-        new RegExp(PROXY_PUBLIC_DOMAIN, "gi"),
-        TARGET_BASE_DOMAIN
-      );
-      args.push("-H", `Origin: ${upstreamOrigin}`);
-    }
-
     if (clientReq.headers.cookie) {
       args.push("-H", `Cookie: ${clientReq.headers.cookie}`);
     }
@@ -165,7 +155,7 @@ const forwardRequest = async (clientReq, clientRes, bodyBuffer = null) => {
       args.push("--data-binary", finalBody.toString("utf8"));
     }
 
-    // Execute curl-chrome returning raw binary buffer
+    // Execute with buffer encoding to keep binary assets intact
     const { stdout } = await execFileAsync(CURL_CHROME_BIN, args, {
       maxBuffer: 100 * 1024 * 1024,
       encoding: "buffer"
@@ -192,13 +182,11 @@ const forwardRequest = async (clientReq, clientRes, bodyBuffer = null) => {
       }
     }
 
-    // Strip headers that interfere with binary decoding and security restrictions
     delete headers["content-security-policy"];
     delete headers["content-security-policy-report-only"];
     delete headers["x-frame-options"];
     delete headers["transfer-encoding"];
     delete headers["content-encoding"];
-    delete headers["content-length"];
 
     if (headers.location) {
       headers.location = headers.location.replace(
@@ -209,11 +197,8 @@ const forwardRequest = async (clientReq, clientRes, bodyBuffer = null) => {
 
     const contentType = headers["content-type"] || "";
 
-    // Strictly detect static media assets
-    const isStaticAsset = clientReq.url.match(/\.(png|jpg|jpeg|gif|svg|webp|woff|woff2|ttf|ico|css|js)(\?.*)?$/i);
-
-    // Only attempt string/HTML replacement on non-static HTML responses
-    if (statusCode === 200 && contentType.includes("text/html") && !isStaticAsset) {
+    // ONLY process HTML pages. ALL binary files (PNG, WOFF2, JS, CSS) bypass string conversion
+    if (statusCode === 200 && contentType.includes("text/html") && !clientReq.url.match(/\.(png|jpg|jpeg|gif|svg|webp|woff|woff2|ttf|ico|css|js)(\?.*)?$/i)) {
       let html = responseBodyBuffer.toString("utf8");
 
       if (html.includes("<head>")) {
@@ -228,7 +213,7 @@ const forwardRequest = async (clientReq, clientRes, bodyBuffer = null) => {
       return clientRes.end(newBody);
     }
 
-    // Pass binary response (PNG, WOFF2, JS, CSS) untouched
+    // Send raw binary buffer untouched
     headers["content-length"] = responseBodyBuffer.length;
     clientRes.writeHead(statusCode, headers);
     clientRes.end(responseBodyBuffer);
@@ -331,6 +316,6 @@ server.on("clientError", (error, socket) => {
 server.listen(PROXY_PORT, PROXY_HOST, () => {
   console.log(`==========================================`);
   console.log(` Proxy listening on http://${PROXY_HOST}:${PROXY_PORT}`);
-  console.log(` Forwarding via curl-chrome with binary handling`);
+  console.log(` Forwarding dynamic subdomains via curl-chrome`);
   console.log(`==========================================`);
 });
