@@ -122,16 +122,21 @@ const forwardRequest = async (clientReq, clientRes, bodyBuffer = null) => {
 
     const targetUrl = `${TARGET.protocol}//${TARGET.hostname}${clientReq.url}`;
 
-    // Build execution flags for curl-impersonate
     const args = [
       "-s", "-i",
       "-X", clientReq.method,
       targetUrl,
       "-H", `Host: ${TARGET.hostname}`,
       "-H", `User-Agent: ${clientReq.headers["user-agent"] || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"}`,
-      "-H", `Accept: ${clientReq.headers["accept"] || "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"}`,
-      "-H", `Accept-Language: ${clientReq.headers["accept-language"] || "en-US,en;q=0.9"}`
+      "-H", `Accept: ${clientReq.headers["accept"] || "*/*"}`,
+      "-H", `Accept-Language: ${clientReq.headers["accept-language"] || "en-US,en;q=0.9"}`,
+      "-H", `Accept-Encoding: identity` // Prevent gzipped responses so Node can parse HTML safely
     ];
+
+    if (clientReq.headers.referer) {
+      const upstreamReferer = clientReq.headers.referer.replace(PROXY_PUBLIC_DOMAIN, TARGET.hostname);
+      args.push("-H", `Referer: ${upstreamReferer}`);
+    }
 
     if (clientReq.headers.cookie) {
       args.push("-H", `Cookie: ${clientReq.headers.cookie}`);
@@ -141,14 +146,13 @@ const forwardRequest = async (clientReq, clientRes, bodyBuffer = null) => {
       args.push("--data-binary", finalBody.toString("utf8"));
     }
 
-    // Execute through Chrome BoringSSL impersonation binary
     const { stdout } = await execFileAsync(CURL_CHROME_BIN, args, {
       maxBuffer: 50 * 1024 * 1024
     });
 
     const headerEndIndex = stdout.indexOf("\r\n\r\n");
     if (headerEndIndex === -1) {
-      throw new Error("Invalid HTTP response format received from upstream.");
+      throw new Error("Invalid HTTP response format from upstream.");
     }
 
     const rawHeaders = stdout.substring(0, headerEndIndex);
@@ -166,9 +170,12 @@ const forwardRequest = async (clientReq, clientRes, bodyBuffer = null) => {
       }
     }
 
+    // Strip problematic headers
     delete headers["content-security-policy"];
     delete headers["content-security-policy-report-only"];
+    delete headers["x-frame-options"];
     delete headers["transfer-encoding"];
+    delete headers["content-encoding"];
 
     if (headers.location) {
       headers.location = headers.location.replace(
@@ -179,17 +186,24 @@ const forwardRequest = async (clientReq, clientRes, bodyBuffer = null) => {
 
     const contentType = headers["content-type"] || "";
 
-    if (contentType.includes("text/html") && bodyText) {
-      const html = injectWatcher(bodyText);
+    // ONLY inject script into actual application HTML (Ignore 404s, JSON, JS, CSS)
+    if (statusCode === 200 && contentType.includes("text/html") && bodyText) {
+      let html = bodyText;
+      
+      // Inject base tag so sub-resources load from root
+      if (html.includes("<head>")) {
+        html = html.replace("<head>", `<head><base href="https://${PROXY_PUBLIC_DOMAIN}/">`);
+      }
+      
+      html = injectWatcher(html);
       const newBody = Buffer.from(html, "utf8");
 
-      delete headers["content-encoding"];
       headers["content-length"] = newBody.length;
-
       clientRes.writeHead(statusCode, headers);
       return clientRes.end(newBody);
     }
 
+    headers["content-length"] = Buffer.byteLength(bodyText);
     clientRes.writeHead(statusCode, headers);
     clientRes.end(Buffer.from(bodyText));
   } catch (error) {
