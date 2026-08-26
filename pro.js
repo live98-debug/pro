@@ -6,12 +6,6 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-/*
- * ==========================================
- * CONFIGURATION
- * ==========================================
- */
-
 const PROXY_HOST = "127.0.0.1";
 const PROXY_PORT = 6005;
 const PROXY_PUBLIC_DOMAIN = "dashsh.bet";
@@ -23,12 +17,6 @@ const REDIRECT_TTL_MS = 30_000;
 
 const CURL_CHROME_BIN = "/usr/local/bin/curl-chrome";
 const clients = new Map();
-
-/*
- * ==========================================
- * SESSION & COOKIE MANAGEMENT
- * ==========================================
- */
 
 const getOrCreateClient = (req, res) => {
   const cookieHeader = req.headers.cookie || "";
@@ -63,12 +51,6 @@ setInterval(() => {
   }
 }, 10_000);
 
-/*
- * ==========================================
- * HTML SCRIPT INJECTION
- * ==========================================
- */
-
 const injectWatcher = (html) => {
   const script = `
 <script>
@@ -101,12 +83,7 @@ const injectWatcher = (html) => {
     : html + script;
 };
 
-/*
- * ==========================================
- * NATIVE STREAM PROXY FOR STATIC ASSETS (PNG, JPG, FONT, CSS)
- * ==========================================
- */
-
+// 1. Native Stream for Static/Binary Files (Prevents Font & Asset Corruption)
 const proxyStaticAssetNative = (clientReq, clientRes, targetHostname) => {
   const options = {
     hostname: targetHostname,
@@ -118,7 +95,7 @@ const proxyStaticAssetNative = (clientReq, clientRes, targetHostname) => {
       host: targetHostname,
       referer: `https://${targetHostname}${clientReq.url}`,
       origin: `https://${targetHostname}`,
-      "accept-encoding": "identity" // Disable compression to pass raw bytes cleanly
+      "accept-encoding": "identity" 
     }
   };
 
@@ -133,22 +110,17 @@ const proxyStaticAssetNative = (clientReq, clientRes, targetHostname) => {
   });
 
   proxyReq.on("error", (err) => {
-    console.error(`❌ Native Stream Error [${clientReq.url}]:`, err.message);
+    console.error(`❌ Asset Error [${clientReq.url}]:`, err.message);
     if (!clientRes.headersSent) {
       clientRes.writeHead(502);
-      clientRes.end("Proxy Asset Error");
+      clientRes.end("Asset Proxy Error");
     }
   });
 
   clientReq.pipe(proxyReq);
 };
 
-/*
- * ==========================================
- * FORWARD DYNAMIC/HTML REQUESTS VIA CURL-CHROME
- * ==========================================
- */
-
+// 2. Forward Dynamic Requests via curl-chrome & Rewrite Hardcoded API Domains
 const forwardRequest = async (clientReq, clientRes, bodyBuffer = null) => {
   try {
     let finalBody = bodyBuffer;
@@ -239,32 +211,35 @@ const forwardRequest = async (clientReq, clientRes, bodyBuffer = null) => {
       );
     }
 
-    let html = responseBodyBuffer.toString("utf8");
+    let bodyStr = responseBodyBuffer.toString("utf8");
 
-    if (html.includes("<head>")) {
-      html = html.replace("<head>", `<head><base href="https://${incomingHost}/">`);
+    // Replace dynamic subdomains inside JavaScript and HTML files
+    bodyStr = bodyStr.replace(/https?:\/\/(api\.)?dashsh\.bet/gi, `https://${incomingHost}`);
+
+    if (bodyStr.includes("<head>")) {
+      bodyStr = bodyStr.replace("<head>", `<head><base href="https://${incomingHost}/">`);
     }
 
-    html = injectWatcher(html);
-    const newBody = Buffer.from(html, "utf8");
+    if (headers["content-type"]?.includes("text/html")) {
+      bodyStr = injectWatcher(bodyStr);
+    }
+
+    const newBody = Buffer.from(bodyStr, "utf8");
 
     headers["content-length"] = newBody.length;
     clientRes.writeHead(statusCode, headers);
     return clientRes.end(newBody);
   } catch (error) {
-    console.error(`❌ Upstream Request Error:`, error.message);
+    console.error(`❌ Upstream Error:`, error.message);
     if (!clientRes.headersSent) {
-      clientRes.writeHead(502, { "Content-Type": "text/html; charset=utf-8" });
+      const isApi = clientReq.url.includes("/api/");
+      clientRes.writeHead(502, { 
+        "Content-Type": isApi ? "application/json" : "text/html; charset=utf-8" 
+      });
+      clientRes.end(isApi ? JSON.stringify({ error: true, message: error.message }) : `<h1>502 Bad Gateway</h1>`);
     }
-    clientRes.end(`<h1>502 Bad Gateway</h1><p>Proxy error: ${error.message}</p>`);
   }
 };
-
-/*
- * ==========================================
- * MAIN HTTP SERVER
- * ==========================================
- */
 
 const server = http.createServer(async (clientReq, clientRes) => {
   const parsedUrl = new URL(
@@ -275,7 +250,6 @@ const server = http.createServer(async (clientReq, clientRes) => {
   const clientId = getOrCreateClient(clientReq, clientRes);
   const state = clients.get(clientId);
 
-  // 1. Redirect Check Route
   if (clientReq.method === "GET" && path === "/__proxy_redirect_status") {
     const response = JSON.stringify({
       redirect: Boolean(state?.redirected),
@@ -290,13 +264,11 @@ const server = http.createServer(async (clientReq, clientRes) => {
     return clientRes.end(response);
   }
 
-  // 2. Ignore CF Telemetry
   if (path.startsWith("/cdn-cgi/")) {
     clientRes.writeHead(204);
     return clientRes.end();
   }
 
-  // 3. Handle Special Redirect API
   if (path === REDIRECT_API_PATH) {
     const chunks = [];
     for await (const chunk of clientReq) {
@@ -343,8 +315,8 @@ const server = http.createServer(async (clientReq, clientRes) => {
     return clientRes.end("Proxy session terminated");
   }
 
-  // 4. ROUTER: Pass static assets directly through HTTPS streaming, bypass curl-chrome entirely
-  const isStaticAsset = path.match(/\.(png|jpg|jpeg|gif|svg|webp|woff|woff2|ttf|ico|css|js)(\?.*)?$/i);
+  // Explicitly direct fonts, styles, images, and binary assets to the native HTTPS pipeline
+  const isStaticAsset = path.match(/\.(png|jpg|jpeg|gif|svg|webp|woff|woff2|ttf|eot|ico|css|json)(\?.*)?$/i);
   
   const incomingHost = clientReq.headers.host || PROXY_PUBLIC_DOMAIN;
   const targetHostname = incomingHost.replace(
@@ -356,7 +328,6 @@ const server = http.createServer(async (clientReq, clientRes) => {
     return proxyStaticAssetNative(clientReq, clientRes, targetHostname);
   }
 
-  // 5. Use curl-chrome only for dynamic HTML pages
   await forwardRequest(clientReq, clientRes, null);
 });
 
@@ -367,6 +338,5 @@ server.on("clientError", (error, socket) => {
 server.listen(PROXY_PORT, PROXY_HOST, () => {
   console.log(`==========================================`);
   console.log(` Proxy listening on http://${PROXY_HOST}:${PROXY_PORT}`);
-  console.log(` Static Assets: Native Stream | Dynamic: curl-chrome`);
   console.log(`==========================================`);
 });
