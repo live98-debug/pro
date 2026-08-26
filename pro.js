@@ -6,10 +6,10 @@ const PROXY_HOST = "127.0.0.1";
 const PROXY_PORT = 6005;
 
 // Public domain users visit
-const PROXY_PUBLIC_DOMAIN = "vamora.com";
+const PROXY_PUBLIC_DOMAIN = "dashsh.bet";
 
 // Upstream production site
-const TARGET_HOSTNAME = "marziplus.com";
+const TARGET_HOSTNAME = "vamos.bet";
 const TARGET_PORT = 443;
 
 // Redirect endpoint
