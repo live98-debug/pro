@@ -4,7 +4,7 @@
   "description": "",
   "main": "verify.js",
   "scripts": {
-    "start": "nodemon pro3.js",
+    "start": "nodemon pro.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
