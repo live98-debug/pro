@@ -13,7 +13,7 @@ const execFileAsync = promisify(execFile);
 
 const PROXY_HOST = "127.0.0.1";
 const PROXY_PORT = 6005;
-const PROXY_PUBLIC_DOMAIN = "dashsh.bet"; // Your public domain or IP
+const PROXY_PUBLIC_DOMAIN = "proxytest.dash.bet"; // Your public domain or IP
 
 const TARGET = {
   hostname: "dash.bet",
