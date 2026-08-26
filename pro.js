@@ -6,7 +6,7 @@ const PROXY_HOST = "127.0.0.1";
 const PROXY_PORT = 5001;
 
 const TARGET = {
-  hostname: "dash.bet",
+  hostname: "marziplus.com",
   port: 443
 };
 
