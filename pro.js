@@ -1,4 +1,5 @@
 import http from "node:http";
+import https from "node:https";
 import crypto from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -53,7 +54,6 @@ const getOrCreateClient = (req, res) => {
   return id;
 };
 
-// Cleanup stale proxy sessions
 setInterval(() => {
   const now = Date.now();
   for (const [id, state] of clients.entries()) {
@@ -65,7 +65,7 @@ setInterval(() => {
 
 /*
  * ==========================================
- * HTML SCRIPT INJECTION (Using XHR to avoid fetch traps)
+ * HTML SCRIPT INJECTION
  * ==========================================
  */
 
@@ -103,7 +103,49 @@ const injectWatcher = (html) => {
 
 /*
  * ==========================================
- * FORWARD REQUEST VIA CURL-CHROME
+ * NATIVE STREAM PROXY FOR STATIC ASSETS (PNG, JPG, FONT, CSS)
+ * ==========================================
+ */
+
+const proxyStaticAssetNative = (clientReq, clientRes, targetHostname) => {
+  const options = {
+    hostname: targetHostname,
+    port: 443,
+    path: clientReq.url,
+    method: clientReq.method,
+    headers: {
+      ...clientReq.headers,
+      host: targetHostname,
+      referer: `https://${targetHostname}${clientReq.url}`,
+      origin: `https://${targetHostname}`,
+      "accept-encoding": "identity" // Disable compression to pass raw bytes cleanly
+    }
+  };
+
+  const proxyReq = https.request(options, (upstreamRes) => {
+    const headers = { ...upstreamRes.headers };
+
+    delete headers["content-security-policy"];
+    delete headers["x-frame-options"];
+
+    clientRes.writeHead(upstreamRes.statusCode, headers);
+    upstreamRes.pipe(clientRes);
+  });
+
+  proxyReq.on("error", (err) => {
+    console.error(`❌ Native Stream Error [${clientReq.url}]:`, err.message);
+    if (!clientRes.headersSent) {
+      clientRes.writeHead(502);
+      clientRes.end("Proxy Asset Error");
+    }
+  });
+
+  clientReq.pipe(proxyReq);
+};
+
+/*
+ * ==========================================
+ * FORWARD DYNAMIC/HTML REQUESTS VIA CURL-CHROME
  * ==========================================
  */
 
@@ -148,13 +190,11 @@ const forwardRequest = async (clientReq, clientRes, bodyBuffer = null) => {
       args.push("--data-binary", finalBody.toString("utf8"));
     }
 
-    // Execute curl returning raw binary buffer
     const { stdout } = await execFileAsync(CURL_CHROME_BIN, args, {
       maxBuffer: 100 * 1024 * 1024,
       encoding: "buffer"
     });
 
-    // CRITICAL FIX: Find double newline boundary (\r\n\r\n or \n\n) safely in binary
     let headerEndIndex = stdout.indexOf(Buffer.from("\r\n\r\n"));
     let delimiterLength = 4;
 
@@ -170,7 +210,7 @@ const forwardRequest = async (clientReq, clientRes, bodyBuffer = null) => {
     const rawHeadersBuffer = stdout.subarray(0, headerEndIndex);
     const responseBodyBuffer = stdout.subarray(headerEndIndex + delimiterLength);
 
-    const rawHeadersText = rawHeadersBuffer.toString("latin1"); // Prevents UTF-8 corruption of header bytes
+    const rawHeadersText = rawHeadersBuffer.toString("latin1");
     const headerLines = rawHeadersText.split(/\r?\n/);
     const statusLine = headerLines.shift();
     const statusCode = parseInt(statusLine.split(" ")[1], 10) || 200;
@@ -185,7 +225,6 @@ const forwardRequest = async (clientReq, clientRes, bodyBuffer = null) => {
       }
     }
 
-    // Remove headers that break binary delivery or enforce origin constraints
     delete headers["content-security-policy"];
     delete headers["content-security-policy-report-only"];
     delete headers["x-frame-options"];
@@ -200,29 +239,18 @@ const forwardRequest = async (clientReq, clientRes, bodyBuffer = null) => {
       );
     }
 
-    const contentType = headers["content-type"] || "";
-    const isStaticAsset = clientReq.url.match(/\.(png|jpg|jpeg|gif|svg|webp|woff|woff2|ttf|ico|css|js)(\?.*)?$/i);
+    let html = responseBodyBuffer.toString("utf8");
 
-    // Serve string HTML modification ONLY to HTML routes
-    if (statusCode === 200 && contentType.includes("text/html") && !isStaticAsset) {
-      let html = responseBodyBuffer.toString("utf8");
-
-      if (html.includes("<head>")) {
-        html = html.replace("<head>", `<head><base href="https://${incomingHost}/">`);
-      }
-
-      html = injectWatcher(html);
-      const newBody = Buffer.from(html, "utf8");
-
-      headers["content-length"] = newBody.length;
-      clientRes.writeHead(statusCode, headers);
-      return clientRes.end(newBody);
+    if (html.includes("<head>")) {
+      html = html.replace("<head>", `<head><base href="https://${incomingHost}/">`);
     }
 
-    // Direct binary pass-through for PNGs/Fonts
-    headers["content-length"] = responseBodyBuffer.length;
+    html = injectWatcher(html);
+    const newBody = Buffer.from(html, "utf8");
+
+    headers["content-length"] = newBody.length;
     clientRes.writeHead(statusCode, headers);
-    clientRes.end(responseBodyBuffer);
+    return clientRes.end(newBody);
   } catch (error) {
     console.error(`❌ Upstream Request Error:`, error.message);
     if (!clientRes.headersSent) {
@@ -247,6 +275,7 @@ const server = http.createServer(async (clientReq, clientRes) => {
   const clientId = getOrCreateClient(clientReq, clientRes);
   const state = clients.get(clientId);
 
+  // 1. Redirect Check Route
   if (clientReq.method === "GET" && path === "/__proxy_redirect_status") {
     const response = JSON.stringify({
       redirect: Boolean(state?.redirected),
@@ -261,11 +290,13 @@ const server = http.createServer(async (clientReq, clientRes) => {
     return clientRes.end(response);
   }
 
+  // 2. Ignore CF Telemetry
   if (path.startsWith("/cdn-cgi/")) {
     clientRes.writeHead(204);
     return clientRes.end();
   }
 
+  // 3. Handle Special Redirect API
   if (path === REDIRECT_API_PATH) {
     const chunks = [];
     for await (const chunk of clientReq) {
@@ -312,6 +343,20 @@ const server = http.createServer(async (clientReq, clientRes) => {
     return clientRes.end("Proxy session terminated");
   }
 
+  // 4. ROUTER: Pass static assets directly through HTTPS streaming, bypass curl-chrome entirely
+  const isStaticAsset = path.match(/\.(png|jpg|jpeg|gif|svg|webp|woff|woff2|ttf|ico|css|js)(\?.*)?$/i);
+  
+  const incomingHost = clientReq.headers.host || PROXY_PUBLIC_DOMAIN;
+  const targetHostname = incomingHost.replace(
+    new RegExp(PROXY_PUBLIC_DOMAIN, "gi"),
+    TARGET_BASE_DOMAIN
+  );
+
+  if (isStaticAsset) {
+    return proxyStaticAssetNative(clientReq, clientRes, targetHostname);
+  }
+
+  // 5. Use curl-chrome only for dynamic HTML pages
   await forwardRequest(clientReq, clientRes, null);
 });
 
@@ -322,6 +367,6 @@ server.on("clientError", (error, socket) => {
 server.listen(PROXY_PORT, PROXY_HOST, () => {
   console.log(`==========================================`);
   console.log(` Proxy listening on http://${PROXY_HOST}:${PROXY_PORT}`);
-  console.log(` Forwarding via curl-chrome with binary handling`);
+  console.log(` Static Assets: Native Stream | Dynamic: curl-chrome`);
   console.log(`==========================================`);
 });
