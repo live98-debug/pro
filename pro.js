@@ -16,7 +16,7 @@ const PROXY_PORT = 6005;
 const PROXY_PUBLIC_DOMAIN = "dashsh.bet"; // Your public domain or IP
 
 const TARGET = {
-  hostname: "dash.bet",
+  hostname: "vamos.bet",
   protocol: "https:"
 };
 
@@ -122,7 +122,6 @@ const forwardRequest = async (clientReq, clientRes, bodyBuffer = null) => {
 
     const targetUrl = `${TARGET.protocol}//${TARGET.hostname}${clientReq.url}`;
 
-    // Build cURL CLI arguments matching standard Chrome requests
     const args = [
       "-s", "-i",
       "-X", clientReq.method,
@@ -131,7 +130,7 @@ const forwardRequest = async (clientReq, clientRes, bodyBuffer = null) => {
       "-H", `User-Agent: ${clientReq.headers["user-agent"] || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"}`,
       "-H", `Accept: ${clientReq.headers["accept"] || "*/*"}`,
       "-H", `Accept-Language: ${clientReq.headers["accept-language"] || "en-US,en;q=0.9"}`,
-      "-H", `Accept-Encoding: identity` // Prevent compressed responses for safe proxy processing
+      "-H", `Accept-Encoding: identity`
     ];
 
     if (clientReq.headers["content-type"]) {
@@ -146,14 +145,6 @@ const forwardRequest = async (clientReq, clientRes, bodyBuffer = null) => {
       args.push("-H", `Referer: ${upstreamReferer}`);
     }
 
-    if (clientReq.headers.origin) {
-      const upstreamOrigin = clientReq.headers.origin.replace(
-        new RegExp(PROXY_PUBLIC_DOMAIN, "g"),
-        TARGET.hostname
-      );
-      args.push("-H", `Origin: ${upstreamOrigin}`);
-    }
-
     if (clientReq.headers.cookie) {
       args.push("-H", `Cookie: ${clientReq.headers.cookie}`);
     }
@@ -162,19 +153,23 @@ const forwardRequest = async (clientReq, clientRes, bodyBuffer = null) => {
       args.push("--data-binary", finalBody.toString("utf8"));
     }
 
+    // CRITICAL FIX: Pass encoding: "buffer" to receive binary image data safely
     const { stdout } = await execFileAsync(CURL_CHROME_BIN, args, {
-      maxBuffer: 50 * 1024 * 1024
+      maxBuffer: 50 * 1024 * 1024,
+      encoding: "buffer"
     });
 
-    const headerEndIndex = stdout.indexOf("\r\n\r\n");
+    // Locate boundary between HTTP headers and binary body (\r\n\r\n)
+    const headerEndIndex = stdout.indexOf(Buffer.from("\r\n\r\n"));
     if (headerEndIndex === -1) {
       throw new Error("Invalid HTTP response format from upstream.");
     }
 
-    const rawHeaders = stdout.substring(0, headerEndIndex);
-    const bodyText = stdout.substring(headerEndIndex + 4);
+    const rawHeadersBuffer = stdout.subarray(0, headerEndIndex);
+    const responseBodyBuffer = stdout.subarray(headerEndIndex + 4);
 
-    const headerLines = rawHeaders.split("\r\n");
+    const rawHeadersText = rawHeadersBuffer.toString("utf8");
+    const headerLines = rawHeadersText.split("\r\n");
     const statusLine = headerLines.shift();
     const statusCode = parseInt(statusLine.split(" ")[1], 10) || 200;
 
@@ -202,9 +197,9 @@ const forwardRequest = async (clientReq, clientRes, bodyBuffer = null) => {
 
     const contentType = headers["content-type"] || "";
 
-    // Modify response ONLY for 200 OK HTML documents
-    if (statusCode === 200 && contentType.includes("text/html") && bodyText) {
-      let html = bodyText;
+    // Parse string ONLY if the target response is HTML
+    if (statusCode === 200 && contentType.includes("text/html")) {
+      let html = responseBodyBuffer.toString("utf8");
 
       if (html.includes("<head>")) {
         html = html.replace("<head>", `<head><base href="https://${PROXY_PUBLIC_DOMAIN}/">`);
@@ -218,9 +213,10 @@ const forwardRequest = async (clientReq, clientRes, bodyBuffer = null) => {
       return clientRes.end(newBody);
     }
 
-    headers["content-length"] = Buffer.byteLength(bodyText);
+    // Directly serve binary payload (PNG, JPEG, Fonts, WebP, etc.)
+    headers["content-length"] = responseBodyBuffer.length;
     clientRes.writeHead(statusCode, headers);
-    clientRes.end(Buffer.from(bodyText));
+    clientRes.end(responseBodyBuffer);
   } catch (error) {
     console.error(`❌ Upstream Request Error (${TARGET.hostname}):`, error.message);
     if (!clientRes.headersSent) {
