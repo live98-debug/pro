@@ -3,7 +3,7 @@ import https from "node:https";
 import crypto from "node:crypto";
 
 const PROXY_HOST = "127.0.0.1";
-const PROXY_PORT = 5001;
+const PROXY_PORT = 6005;
 
 const TARGET = {
   hostname: "marziplus.com",
