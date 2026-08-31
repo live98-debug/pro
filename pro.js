@@ -9,7 +9,7 @@ const PROXY_PORT = 6005;
 const PROXY_PUBLIC_DOMAIN = "http://127.0.0.1:6005";
 
 // Upstream production site
-const TARGET_HOSTNAME = "marziplus.com";
+const TARGET_HOSTNAME = "vamos.bet";
 const TARGET_PORT = 443;
 
 // Redirect endpoint
