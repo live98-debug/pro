@@ -9,7 +9,7 @@ const PROXY_PORT = 6005;
 const PROXY_PUBLIC_DOMAIN = "dashsh.bet";
 
 // Upstream production site
-const TARGET_HOSTNAME = "demoqa.com";
+const TARGET_HOSTNAME = "vamos.bet";
 const TARGET_PORT = 443;
 
 // Redirect endpoint
