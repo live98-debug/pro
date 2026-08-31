@@ -15,6 +15,20 @@ const REDIRECT_BASE_URL = "https://test3.marziplus.com";
 
 /*
 |--------------------------------------------------------------------------
+| CONNECTION POOLING (Fixes 502 Socket Hangups under VPS load)
+|--------------------------------------------------------------------------
+*/
+
+const agent = new https.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 10_000,
+  maxSockets: 100,
+  maxFreeSockets: 10,
+  timeout: 60_000
+});
+
+/*
+|--------------------------------------------------------------------------
 | REDIRECT WATCHER INJECTION
 |--------------------------------------------------------------------------
 */
@@ -53,7 +67,7 @@ function injectWatcher(html) {
 
 /*
 |--------------------------------------------------------------------------
-| HEADER CLEANUP
+| HEADER CLEANUP HELPERS
 |--------------------------------------------------------------------------
 */
 
@@ -86,7 +100,7 @@ function buildUpstreamHeaders(clientReq) {
   const headers = {
     ...clientReq.headers,
     host: TARGET_HOSTNAME,
-    "accept-encoding": "identity", // Force raw text to allow script injection
+    "accept-encoding": "identity", // Raw text for script injection
     "user-agent": clientReq.headers["user-agent"] || "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
   };
 
@@ -95,6 +109,28 @@ function buildUpstreamHeaders(clientReq) {
   delete headers["transfer-encoding"];
 
   return headers;
+}
+
+function mergeSetCookieHeaders(clientRes, upstreamHeaders) {
+  const resHeaders = removeHopByHopHeaders(upstreamHeaders);
+  
+  // Merge proxy-set cookies with upstream cookies if both exist
+  const existingCookie = clientRes.getHeader("Set-Cookie");
+  if (existingCookie) {
+    const upstreamCookies = resHeaders["set-cookie"] || [];
+    const combined = Array.isArray(existingCookie) 
+      ? existingCookie 
+      : [existingCookie];
+
+    if (Array.isArray(upstreamCookies)) {
+      combined.push(...upstreamCookies);
+    } else if (upstreamCookies) {
+      combined.push(upstreamCookies);
+    }
+    resHeaders["set-cookie"] = combined;
+  }
+  
+  return resHeaders;
 }
 
 /*
@@ -108,11 +144,12 @@ function forwardRequest(clientReq, clientRes, bufferedBody = null) {
 
   const options = {
     hostname: TARGET_HOSTNAME,
-    servername: TARGET_HOSTNAME, // REQUIRED FOR TLS SNI (Fixes 502 Bad Gateway)
+    servername: TARGET_HOSTNAME, // Required SNI Header
     port: TARGET_PORT,
     method: clientReq.method,
     path: clientReq.url,
     headers,
+    agent, // Persistent Socket Agent
     rejectUnauthorized: true
   };
 
@@ -130,7 +167,7 @@ function forwardRequest(clientReq, clientRes, bufferedBody = null) {
         html = injectWatcher(html);
         body = Buffer.from(html, "utf8");
 
-        const resHeaders = removeHopByHopHeaders(upstreamRes.headers);
+        const resHeaders = mergeSetCookieHeaders(clientRes, upstreamRes.headers);
         delete resHeaders["content-length"];
         delete resHeaders["content-encoding"];
         resHeaders["content-length"] = body.length;
@@ -142,13 +179,13 @@ function forwardRequest(clientReq, clientRes, bufferedBody = null) {
     }
 
     // Normal Assets & API Pass-through
-    const resHeaders = removeHopByHopHeaders(upstreamRes.headers);
+    const resHeaders = mergeSetCookieHeaders(clientRes, upstreamRes.headers);
     clientRes.writeHead(upstreamRes.statusCode || 200, resHeaders);
     upstreamRes.pipe(clientRes);
   });
 
   upstreamReq.on("error", error => {
-    console.error(`❌ Upstream SSL/Connection Error: [${error.code}] ${error.message}`);
+    console.error(`❌ Upstream Connection Error: [${error.code}] ${error.message}`);
     if (!clientRes.headersSent) {
       clientRes.writeHead(502, { "Content-Type": "text/plain; charset=utf-8" });
     }
@@ -166,7 +203,7 @@ function forwardRequest(clientReq, clientRes, bufferedBody = null) {
 
 /*
 |--------------------------------------------------------------------------
-| STATELESS COOKIE HELPERS
+| COOKIE HELPER
 |--------------------------------------------------------------------------
 */
 
@@ -193,11 +230,11 @@ const server = http.createServer(async (clientReq, clientRes) => {
     const userRedirectUrl = getCookie(clientReq, "proxy_redirect_url");
     const isRedirected = Boolean(userRedirectUrl);
 
-    // 1. Reset state on home navigation
+    // 1. Reset state on home navigation (appends Secure flag for HTTPS)
     if (clientReq.method === "GET" && (path === "/" || path.startsWith("/home/"))) {
       clientRes.setHeader(
         "Set-Cookie",
-        "proxy_redirect_url=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax"
+        "proxy_redirect_url=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; Secure; SameSite=Lax"
       );
     }
 
@@ -252,10 +289,10 @@ const server = http.createServer(async (clientReq, clientRes) => {
 
       const finalUrl = redirectUrl.toString();
 
-      // Store redirect target inside client-scoped cookie
+      // Store redirect target inside client-scoped cookie with Secure flag
       clientRes.setHeader(
         "Set-Cookie",
-        `proxy_redirect_url=${encodeURIComponent(finalUrl)}; Path=/; Max-Age=30; HttpOnly; SameSite=Lax`
+        `proxy_redirect_url=${encodeURIComponent(finalUrl)}; Path=/; Max-Age=30; HttpOnly; Secure; SameSite=Lax`
       );
 
       const response = JSON.stringify({ success: true, proxyRedirect: true });
