@@ -13,7 +13,7 @@ const TARGET_HOSTNAME = "vamos.bet";
 const TARGET_PORT = 443;
 
 // Redirect endpoint
-const REDIRECT_API_PATH = "/api/v9/test/redirect";
+const REDIRECT_API_PATH = "/api/v2/transactions/deposit";
 
 // Redirect destination
 const REDIRECT_BASE_URL = "https://test3.marziplus.com";
