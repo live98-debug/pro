@@ -6,7 +6,7 @@ const PROXY_HOST = "127.0.0.1";
 const PROXY_PORT = 6005;
 
 // Upstream website
-const TARGET_HOSTNAME = "vamos.bet";
+const TARGET_HOSTNAME = "dash.bet";
 const TARGET_PORT = 443;
 
 // Redirect trigger API
