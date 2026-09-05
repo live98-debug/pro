@@ -1,85 +1,45 @@
-deploy@srv1930021:~/pro$ curl -v --max-time 15 http://127.0.0.1:6005/ -o /dev/null
-  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
-                                 Dload  Upload   Total   Spent    Left  Speed
-  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0*   Trying 127.0.0.1:6005...
-* Connected to 127.0.0.1 (127.0.0.1) port 6005
-> GET / HTTP/1.1
-> Host: 127.0.0.1:6005
-> User-Agent: curl/8.5.0
-> Accept: */*
-> 
-< HTTP/1.1 200 OK
-< Set-Cookie: proxy_client_id=acafa1fc-4a3f-458a-b974-bdf3cc03183c; Path=/; HttpOnly; SameSite=Lax
-< date: Mon, 31 Aug 2026 22:24:43 GMT
-< content-type: text/html
-< transfer-encoding: chunked
-< vary: Accept-Encoding
-< last-modified: Fri, 28 Aug 2026 13:04:34 GMT
-< x-frame-options: SAMEORIGIN
-< strict-transport-security: max-age=31536000; includeSubDomains
-< x-xss-protection: 1; mode=block
-< cf-cache-status: DYNAMIC
-< report-to: {"group":"cf-nel","max_age":604800,"endpoints":[{"url":"https://a.nel.cloudflare.com/report/v4?s=MiZfQBYbll7D%2FkdXkQIRpRUIcZSi5j%2BW3iCPc84e3DfFVyNtreVWi1Xcd2GsKHvfU6%2Fo7ct70AmRKwDB%2FBHvJkcPFH1Yi%2Fir%2F%2FvOQMbDomG0Hu0z8K1HS5PDv%2FVAhkgh2iQoYNUTUiU%3D"}]}
-< nel: {"report_to":"cf-nel","success_fraction":0.0,"max_age":604800}
-< expect-ct: max-age=86400, enforce
-< referrer-policy: same-origin
-< x-content-type-options: nosniff
-< server: cloudflare
-< cf-ray: a33f726d1cd02a34-CDG
-< alt-svc: h3=":443"; ma=86400
-< content-length: 21629
-< Connection: keep-alive
-< Keep-Alive: timeout=5
-< 
-{ [21629 bytes data]
-100 21629    0 21629    0     0   365k      0 --:--:-- --:--:-- --:--:--  370k
-* Connection #0 to host 127.0.0.1 left intact
-deploy@srv1930021:~/pro$ for i in {1..20}; do
-  echo "=== $i ==="
-  curl -sS -o /dev/null \
-    -w "HTTP=%{http_code} TIME=%{time_total}\n" \
-    --max-time 15 \
-    http://127.0.0.1:6005/
-  sleep 1
-done
-=== 1 ===
-HTTP=200 TIME=0.031644
-=== 2 ===
-HTTP=200 TIME=0.033370
-=== 3 ===
-HTTP=200 TIME=0.037871
-=== 4 ===
-HTTP=200 TIME=0.037708
-=== 5 ===
-HTTP=200 TIME=0.036252
-=== 6 ===
-HTTP=200 TIME=0.032826
-=== 7 ===
-HTTP=200 TIME=0.032134
-=== 8 ===
-HTTP=200 TIME=0.030897
-=== 9 ===
-HTTP=200 TIME=0.031739
-=== 10 ===
-HTTP=200 TIME=0.031395
-=== 11 ===
-HTTP=200 TIME=0.031626
-=== 12 ===
-HTTP=200 TIME=0.030485
-=== 13 ===
-HTTP=200 TIME=0.033267
-=== 14 ===
-HTTP=200 TIME=0.032484
-=== 15 ===
-HTTP=200 TIME=0.031124
-=== 16 ===
-HTTP=200 TIME=0.023327
-=== 17 ===
-HTTP=200 TIME=0.032254
-=== 18 ===
-HTTP=200 TIME=0.030619
-=== 19 ===
-HTTP=200 TIME=0.030905
-=== 20 ===
-HTTP=200 TIME=0.029831
-deploy@srv1930021:~/pro$ 
+ dig @1.1.1.1 mymarzi.com A
+
+; <<>> DiG 9.10.6 <<>> @1.1.1.1 mymarzi.com A
+; (1 server found)
+;; global options: +cmd
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 8197
+;; flags: qr rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+;; QUESTION SECTION:
+;mymarzi.com.			IN	A
+
+;; ANSWER SECTION:
+mymarzi.com.		14400	IN	A	31.97.193.135
+
+;; Query time: 566 msec
+;; SERVER: 1.1.1.1#53(1.1.1.1)
+;; WHEN: Sat Sep 05 13:22:33 EAT 2026
+;; MSG SIZE  rcvd: 55
+
+ ~ ...................................................................................... 13:22:33 
+> dig @1.1.1.1 mymarzi.com A
+
+; <<>> DiG 9.10.6 <<>> @1.1.1.1 mymarzi.com A
+; (1 server found)
+;; global options: +cmd
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 50073
+;; flags: qr rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+;; QUESTION SECTION:
+;mymarzi.com.			IN	A
+
+;; ANSWER SECTION:
+mymarzi.com.		14387	IN	A	31.97.193.135
+
+;; Query time: 5 msec
+;; SERVER: 1.1.1.1#53(1.1.1.1)
+;; WHEN: Sat Sep 05 13:22:46 EAT 2026
+;; MSG SIZE  rcvd: 55
+

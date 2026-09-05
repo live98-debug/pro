@@ -12,7 +12,7 @@ import { Transform } from "node:stream";
 const PROXY_HOST = "127.0.0.1";
 const PROXY_PORT = 6005;
 
-const TARGET_HOSTNAME = "vamos.bet";
+const TARGET_HOSTNAME = "arada1.bet";
 const TARGET_PORT = 443;
 
 const REDIRECT_API_PATH =
