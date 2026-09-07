@@ -65,3 +65,6 @@ temp/
 
 # Node diagnostic reports
 report.*.json
+
+# Persistent runtime data
+data/

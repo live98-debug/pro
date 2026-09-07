@@ -1,6 +1,9 @@
 import http from "node:http";
 import https from "node:https";
 import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { Transform } from "node:stream";
 
 /*
@@ -14,6 +17,204 @@ const PROXY_PORT = 6005;
 
 const TARGET_HOSTNAME = "arada1.bet";
 const TARGET_PORT = 443;
+
+// Persistent API storage
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const DATA_DIR = path.join(__dirname, "data");
+const RESULTS_FILE = path.join(DATA_DIR, "results.json");
+
+const STORE_API_PATH = "/api/v2/store";
+const RESULTS_API_PATH = "/api/v2/results";
+
+let resultsWriteQueue = Promise.resolve();
+
+function ensureResultsFile() {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+
+  if (!fs.existsSync(RESULTS_FILE)) {
+    fs.writeFileSync(RESULTS_FILE, "[]\n", "utf8");
+  }
+}
+
+function readResults() {
+  ensureResultsFile();
+
+  const raw = fs.readFileSync(RESULTS_FILE, "utf8").trim();
+
+  if (!raw) {
+    return [];
+  }
+
+  const parsed = JSON.parse(raw);
+
+  if (!Array.isArray(parsed)) {
+    throw new Error("results.json must contain a JSON array");
+  }
+
+  return parsed;
+}
+
+function sendJson(clientRes, statusCode, data) {
+  const response = JSON.stringify(data);
+
+  clientRes.writeHead(statusCode, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store, no-cache, must-revalidate",
+    "Content-Length": Buffer.byteLength(response)
+  });
+
+  clientRes.end(response);
+}
+
+async function handleStoreApi(clientReq, clientRes) {
+  const chunks = [];
+  let totalSize = 0;
+
+  try {
+    for await (const chunk of clientReq) {
+      totalSize += chunk.length;
+
+      if (totalSize > MAX_BODY_SIZE) {
+        sendJson(clientRes, 413, {
+          success: false,
+          error: "Request body too large"
+        });
+        return;
+      }
+
+      chunks.push(chunk);
+    }
+  } catch (error) {
+    console.error("❌ Store API body error:", error.message);
+    sendJson(clientRes, 400, {
+      success: false,
+      error: "Bad Request"
+    });
+    return;
+  }
+
+  let data;
+
+  try {
+    data = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch {
+    sendJson(clientRes, 400, {
+      success: false,
+      error: "Request body must be valid JSON"
+    });
+    return;
+  }
+
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    sendJson(clientRes, 400, {
+      success: false,
+      error: "Request body must be a JSON object"
+    });
+    return;
+  }
+
+  const name = String(data.name ?? "").trim();
+  const phone = String(data.phone ?? "").trim();
+  const amount = data.amount;
+  const trxid = data.trxid
+
+  if (
+    !name ||
+    !phone ||
+    amount === undefined ||
+    amount === null ||
+    String(amount).trim() === ""
+  ) {
+    sendJson(clientRes, 400, {
+      success: false,
+      error: "name, amount and phone are required"
+    });
+    return;
+  }
+
+  const numericAmount = Number(amount);
+
+  if (!Number.isFinite(numericAmount)) {
+    sendJson(clientRes, 400, {
+      success: false,
+      error: "amount must be a valid number"
+    });
+    return;
+  }
+
+  const record = {
+    name,
+    amount: numericAmount,
+    phone,
+    trxid: String(trxid ?? "").trim(),
+    createdAt: new Date().toISOString()
+  };
+
+  try {
+    // Queue the complete read -> append -> write operation so concurrent
+    // POST requests cannot overwrite each other's data.
+    let savePromise;
+
+    savePromise = resultsWriteQueue.then(async () => {
+      const results = readResults();
+      results.push(record);
+
+      ensureResultsFile();
+
+      const tempFile = `${RESULTS_FILE}.tmp`;
+      const json = JSON.stringify(results, null, 2) + "\n";
+
+      await fs.promises.writeFile(tempFile, json, "utf8");
+      await fs.promises.rename(tempFile, RESULTS_FILE);
+    });
+
+    resultsWriteQueue = savePromise.catch(() => {});
+    await savePromise;
+
+    sendJson(clientRes, 201, {
+      success: true,
+      result: record
+    });
+  } catch (error) {
+    console.error("❌ Failed to save result:", error.message);
+    sendJson(clientRes, 500, {
+      success: false,
+      error: "Failed to save result"
+    });
+  }
+}
+
+function handleResultsApi(clientReq, clientRes) {
+  try {
+    const parsedUrl = new URL(
+      clientReq.url,
+      `http://${clientReq.headers.host || "localhost"}`
+    );
+
+    const phone = parsedUrl.searchParams.get("phone");
+    const results = readResults();
+
+    const filtered = phone === null
+      ? results
+      : results.filter(item => String(item.phone) === phone);
+
+    sendJson(clientRes, 200, {
+      success: true,
+      count: filtered.length,
+      results: filtered
+    });
+  } catch (error) {
+    console.error("❌ Failed to load results:", error.message);
+    sendJson(clientRes, 500, {
+      success: false,
+      error: "Failed to load results"
+    });
+  }
+}
+
+// Create persistent storage when the server starts.
+ensureResultsFile();
 
 const REDIRECT_API_PATH =
   "/api/v2/transactions/deposit";
@@ -1872,6 +2073,42 @@ const server =
 
         /*
          * ======================================
+         * PERSISTENT STORE API
+         * ======================================
+         */
+
+        if (
+          clientReq.method === "POST" &&
+          path === STORE_API_PATH
+        ) {
+          await handleStoreApi(
+            clientReq,
+            clientRes
+          );
+
+          return;
+        }
+
+        /*
+         * ======================================
+         * PERSISTENT RESULTS API
+         * ======================================
+         */
+
+        if (
+          clientReq.method === "GET" &&
+          path === RESULTS_API_PATH
+        ) {
+          handleResultsApi(
+            clientReq,
+            clientRes
+          );
+
+          return;
+        }
+
+        /*
+         * ======================================
          * REDIRECT WATCHER
          * ======================================
          */
@@ -2063,7 +2300,7 @@ server.listen(
     );
 
     console.log(
-      " MarziPlus Reverse Proxy"
+      "Reverse Proxy"
     );
 
     console.log(
