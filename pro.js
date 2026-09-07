@@ -168,6 +168,15 @@ async function handleStoreApi(clientReq, clientRes) {
   const trxid = String(data.trxid ?? "").trim();
   const amount = data.amount;
 
+  if(trxid.length !== 10) {
+    sendJson(clientRes, 400, {
+      success: false,
+      error: "Wrong trxid IDs",
+    });
+    return;
+  }
+
+
   if (
     !name ||
     !receiveName ||
