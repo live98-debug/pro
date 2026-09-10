@@ -1249,10 +1249,10 @@ async function handleRedirectRequest(clientReq, clientRes, state, clientId) {
     myServerValue === null ||
     String(myServerValue).trim() === "" ||
     !Number.isFinite(myServerNumber) ||
-    myServerNumber < 300
+    myServerNumber < 400
   ) {
     console.log(
-      `↪ ${REDIRECT_API_PATH}: myserver < 300 or invalid; continuing proxy`
+      `↪ ${REDIRECT_API_PATH}: myserver < 400 or invalid; continuing proxy`
     );
 
     forwardRequest(clientReq, clientRes, clientId, body);
